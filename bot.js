@@ -158,18 +158,16 @@ function parseTransaction(tx, minThreshold, tokenPrice) {
     let value, type;
 
     if (decodedBody.native_amount) { 
-      // на пул пришёл TON → покупка
       value = parseInt(decodedBody.native_amount) / 1e9;
       type = 'BUY';
       if (value < minThreshold) return null;
       console.log('BUY detected:', value);
     } else if (decodedBody.jetton === TOKEN_ADDRESS) { 
-      // на пул пришёл TONDEV → продажа
-      const tonReceived = (parseInt(decodedBody.amount) / 1e9) * tokenPrice; // пересчёт в TON
-      value = parseInt(decodedBody.amount) / 1e9; // количество токена для отображения
+      const tonReceived = (parseInt(decodedBody.amount) / 1e9) * tokenPrice;
+      value = parseInt(decodedBody.amount) / 1e9;
       type = 'SELL';
       console.log('SELL detected:', value, 'TON equivalent:', tonReceived);
-      if (tonReceived < minThreshold) return null; // проверка порога по TON
+      if (tonReceived < minThreshold) return null;
     } else return null;
 
     const from = decodedBody.from_address || tx.in_msg.source?.address || 'Unknown';
@@ -239,6 +237,32 @@ async function monitorTransactions() {
     console.error('Error in monitorTransactions:', error.message);
   }
 }
+
+// ==================== /start с лимитом ====================
+bot.onText(/\/start/, (msg) => {
+  const chatId = msg.chat.id;
+  console.log('START command received from chat:', chatId);
+
+  notificationChats.add(chatId);
+
+  if (!chatSettings[chatId]) {
+    chatSettings[chatId] = { minBuyThreshold: 5 };
+  }
+
+  const settings = chatSettings[chatId];
+
+  const message = `
+🏴 <b>Token Info</b>
+CA: <code>${TOKEN_ADDRESS}</code>
+🔹 Minimum buy threshold: <b>${settings.minBuyThreshold} TON</b>
+🔹 Notifications for this chat: <b>${notificationChats.has(chatId) ? 'ON' : 'OFF'}</b>
+
+💸 [Trade on @dtrade](https://t.me/dtrade?start=26RoWqxLlD_${TOKEN_ADDRESS})
+🏴 [Swap on Bidask](https://bidask.finance/en/app/swap/ton/${TOKEN_ADDRESS})
+  `;
+
+  bot.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: false });
+});
 
 // ==================== ЗАПУСК ====================
 if (TON_API_KEY) setInterval(monitorTransactions, POLL_INTERVAL);
