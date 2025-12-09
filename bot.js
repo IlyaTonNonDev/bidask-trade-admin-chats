@@ -244,7 +244,7 @@ CA: <code>${TOKEN_ADDRESS}</code>
 `;
 
   try {
-    await bot.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: false });
+    await bot.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: true });
   } catch (error) {
     console.error('Error sending /start message:', error.message);
   }
