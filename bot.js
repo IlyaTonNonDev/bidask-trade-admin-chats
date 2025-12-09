@@ -144,18 +144,27 @@ async function getTokenImage() {
   } catch (error) { console.error('Error fetching token logo:', error.message); return null; }
 }
 
+// ==================== ПАРСИНГ ТРАНЗАКЦИЙ ====================
 function parseTransaction(tx, minThreshold) {
   try {
     if (!tx.in_msg) return null;
     const opName = tx.in_msg.decoded_op_name;
     const decodedBody = tx.in_msg.decoded_body;
     if (opName !== 'bidask_damm_swap' || !decodedBody) return null;
-    const value = parseInt(decodedBody.native_amount || 0) / 1e9;
+
+    let value, type;
+    if (decodedBody.native_amount) { // на пул пришёл TON → покупка
+      value = parseInt(decodedBody.native_amount) / 1e9;
+      type = 'BUY';
+    } else if (decodedBody.jetton === TOKEN_ADDRESS) { // на пул пришёл TONDEV → продажа
+      value = parseInt(decodedBody.amount) / 1e9;
+      type = 'SELL';
+    } else return null;
+
     if (value < minThreshold) return null;
 
     const from = decodedBody.from_address || tx.in_msg.source?.address || 'Unknown';
     const to = decodedBody.to_address || 'Unknown';
-    const type = to.toLowerCase() === BIDASK_POOL_ADDRESS.toLowerCase() ? 'SELL' : 'BUY';
 
     return { volume: value, from, to, type, hash: tx.hash || '', timestamp: tx.utime || 0 };
   } catch (error) { console.error('Error parsing transaction:', error.message); return null; }
