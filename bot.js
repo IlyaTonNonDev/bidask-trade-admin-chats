@@ -153,13 +153,18 @@ function parseTransaction(tx, minThreshold) {
     if (opName !== 'bidask_damm_swap' || !decodedBody) return null;
 
     let value, type;
-    if (decodedBody.native_amount) { // на пул пришёл TON → покупка
+
+    // Покупка: на пул пришёл TON
+    if (decodedBody.native_amount) {
       value = parseInt(decodedBody.native_amount) / 1e9;
       type = 'BUY';
-    } else if (decodedBody.jetton === TOKEN_ADDRESS) { // на пул пришёл TONDEV → продажа
+    } 
+    // Продажа: на пул пришёл TONDEV (jetton)
+    else if (decodedBody.jetton && decodedBody.jetton.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) {
       value = parseInt(decodedBody.amount) / 1e9;
       type = 'SELL';
-    } else return null;
+    } 
+    else return null;
 
     if (value < minThreshold) return null;
 
@@ -167,7 +172,10 @@ function parseTransaction(tx, minThreshold) {
     const to = decodedBody.to_address || 'Unknown';
 
     return { volume: value, from, to, type, hash: tx.hash || '', timestamp: tx.utime || 0 };
-  } catch (error) { console.error('Error parsing transaction:', error.message); return null; }
+  } catch (error) { 
+    console.error('Error parsing transaction:', error.message); 
+    return null; 
+  }
 }
 
 // ==================== УВЕДОМЛЕНИЯ ====================
@@ -182,7 +190,7 @@ async function sendNotification(chatId, txData, price) {
     caption = `<b>NEW BUY!</b> ${emoji}\n\n💎 <b>${formatNumber(txData.volume)} TON</b>\n🦑 <a href="https://tonviewer.com/${buyerInfo.link}">${buyerDisplay}</a> | <a href="https://tonviewer.com/transaction/${txData.hash}">Txn</a>\n🌐 MC: ${mc}`;
   } else {
     emoji = getHeartString(txData.volume);
-    caption = `<b>NEW SELL!</b> ${emoji}\n\n💖 <b>${formatNumber(txData.volume)} TON</b>\n🦑 <a href="https://tonviewer.com/${buyerInfo.link}">${buyerDisplay}</a> | <a href="https://tonviewer.com/transaction/${txData.hash}">Txn</a>\n🌐 MC: ${mc}`;
+    caption = `<b>NEW SELL!</b> ${emoji}\n\n💖 <b>${formatNumber(txData.volume)} TONDEV</b>\n🦑 <a href="https://tonviewer.com/${buyerInfo.link}">${buyerDisplay}</a> | <a href="https://tonviewer.com/transaction/${txData.hash}">Txn</a>\n🌐 MC: ${mc}`;
   }
 
   const keyboard = {
