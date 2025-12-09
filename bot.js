@@ -342,6 +342,12 @@ async function sendBuyNotification(buyData, price) {
           text: 'Graph',
           url: `https://x1000.finance/tokens/${TOKEN_ADDRESS}?ref=nextmayor`
         }
+      ],
+      [
+        {
+          text: 'JOIN HOLDERS CHAT',
+          url: 'https://t.me/tondev_jetton/289'
+        }
       ]
     ]
   };
@@ -417,7 +423,7 @@ async function monitorTransactions() {
 const sendCAInfo = (chatId) => {
   const message = `
 🏴 [SWAP ON BIDASK](https://bidask.finance/en/app/swap/ton/${TOKEN_ADDRESS})
-💸 [TRADE ON @dtrade](http://t.me/dtrade?start=${TOKEN_ADDRESS})
+💸 [TRADE ON @dtrade](https://t.me/dtrade?start=26RoWqxLlD_${TOKEN_ADDRESS})
 
 CA: \`${TOKEN_ADDRESS}\`
   `;
