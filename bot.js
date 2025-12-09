@@ -3,7 +3,6 @@
 // Для запуска на bothost.ru или другом хостинге
 
 const TelegramBot = require('node-telegram-bot-api');
-const fetch = require('node-fetch'); // если используешь node < 18
 
 // ==================== КОНФИГУРАЦИЯ ====================
 const TOKEN_ADDRESS = 'EQDKMh511DOn02mL0nf0JrND0TlkUKmos17eK9zKyGAsjS1K';
