@@ -1,5 +1,6 @@
 // Telegram Bot: CA info + Модерация (mute/unmute) + Мониторинг покупок и продаж
 const TelegramBot = require('node-telegram-bot-api');
+const fetch = require('node-fetch');
 
 // ==================== КОНФИГУРАЦИЯ ====================
 const TOKEN_ADDRESS = 'EQDKMh511DOn02mL0nf0JrND0TlkUKmos17eK9zKyGAsjS1K';
@@ -148,45 +149,43 @@ async function getTokenImage() {
 function parseTransaction(tx, minThreshold, tokenPrice) {
   try {
     if (!tx.in_msg) return null;
+
     const opName = tx.in_msg.decoded_op_name;
     const decodedBody = tx.in_msg.decoded_body;
+
     if (opName !== 'bidask_damm_swap' || !decodedBody) return null;
 
-    let value, type;
+    let value, type, tonEquivalent;
 
-    if (decodedBody.native_amount) { 
-      // на пул пришёл TON → покупка
+    if (decodedBody.native_amount) {
+      // Покупка: на пул пришёл TON
       value = parseInt(decodedBody.native_amount) / 1e9;
+      tonEquivalent = value;
       type = 'BUY';
       if (value < minThreshold) return null;
-    } else if (decodedBody.jetton === TOKEN_ADDRESS) { 
-      // на пул пришёл TONDEV → продажа
-      const tonReceived = parseInt(decodedBody.amount) / 1e9 * tokenPrice; // пересчёт в TON
-      value = parseInt(decodedBody.amount) / 1e9; // количество токена для отображения
+    } else if (decodedBody.jetton && decodedBody.jetton.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) {
+      // Продажа: на пул пришёл TONDEV
+      value = parseInt(decodedBody.amount) / 1e9;
+      if (!tokenPrice) {
+        console.log('Token price not available, skipping SELL');
+        return null;
+      }
+      tonEquivalent = value * tokenPrice;
       type = 'SELL';
-      if (tonReceived < minThreshold) return null; // проверка порога по TON
+      if (tonEquivalent < minThreshold) return null;
     } else return null;
 
     const from = decodedBody.from_address || tx.in_msg.source?.address || 'Unknown';
     const to = decodedBody.to_address || 'Unknown';
 
-    return { 
-      volume: value,
-      from,
-      to,
-      type,
-      hash: tx.hash || '',
-      timestamp: tx.utime || 0
-    };
-  } catch (error) { 
-    console.error('Error parsing transaction:', error.message); 
-    return null; 
+    return { volume: value, from, to, type, tonEquivalent, hash: tx.hash || '', timestamp: tx.utime || 0 };
+  } catch (error) {
+    console.error('Error parsing transaction:', error.message);
+    return null;
   }
 }
 
-
-
-// ==================== УВЕДОМЛЕНИЯ ====================
+// ==================== SEND NOTIFICATION ====================
 async function sendNotification(chatId, txData, price) {
   const buyerInfo = await formatAddress(txData.from);
   const buyerDisplay = buyerInfo.display.length > 20 ? buyerInfo.display.substring(0, 17) + '...' : buyerInfo.display;
@@ -213,7 +212,9 @@ async function sendNotification(chatId, txData, price) {
     const tokenImage = await getTokenImage();
     if (tokenImage) await bot.sendPhoto(chatId, tokenImage, { caption, parse_mode: 'HTML', reply_markup: keyboard });
     else await bot.sendMessage(chatId, caption, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: keyboard });
-  } catch (error) { console.error('Error sending notification:', error.message); }
+  } catch (error) {
+    console.error('Error sending notification:', error.message);
+  }
 }
 
 // ==================== МОНИТОРИНГ ====================
@@ -222,16 +223,29 @@ let lastProcessedTimestamp = Math.floor(Date.now() / 1000) - 600;
 async function monitorTransactions() {
   try {
     if (!TON_API_KEY) return;
+
     const transactions = await getTransactions() || [];
     const price = await getTokenPrice();
+
+    if (!price) console.log('Warning: token price not loaded');
+
     for (const chatId of notificationChats) {
       const minThreshold = chatSettings[chatId]?.minBuyThreshold || 5;
+      console.log(`Monitoring chat ${chatId} with minThreshold ${minThreshold}`);
+
       for (const tx of transactions) {
         if (tx.utime <= lastProcessedTimestamp) continue;
-        const txData = parseTransaction(tx, minThreshold);
+
+        console.log(`Processing tx ${tx.hash} at ${tx.utime}`);
+        const txData = parseTransaction(tx, minThreshold, price);
+
         if (txData) {
+          console.log(`Sending notification: ${txData.type} of ${txData.volume} (${txData.tonEquivalent.toFixed(2)} TON equivalent)`);
           await sendNotification(chatId, txData, price);
+
           if (txData.timestamp > lastProcessedTimestamp) lastProcessedTimestamp = txData.timestamp;
+        } else {
+          console.log('Tx skipped: below threshold or not relevant');
         }
       }
     }
