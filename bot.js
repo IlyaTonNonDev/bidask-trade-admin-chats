@@ -90,20 +90,6 @@ function calculateMC(price) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(price * TOTAL_SUPPLY);
 }
 
-function parseDuration(durationStr) {
-  const match = durationStr.match(/^(\d+)\s*(m|min|minutes?|h|hours?|d|days?|w|weeks?)$/i);
-  if (!match) return null;
-  const value = parseInt(match[1], 10);
-  const unit = match[2].toLowerCase();
-  let seconds, displayText;
-  if (unit.startsWith('m')) { seconds = value * 60; displayText = `${value} minute${value > 1 ? 's' : ''}`; }
-  else if (unit.startsWith('h')) { seconds = value * 60 * 60; displayText = `${value} hour${value > 1 ? 's' : ''}`; }
-  else if (unit.startsWith('d')) { seconds = value * 60 * 60 * 24; displayText = `${value} day${value > 1 ? 's' : ''}`; }
-  else if (unit.startsWith('w')) { seconds = value * 60 * 60 * 24 * 7; displayText = `${value} week${value > 1 ? 's' : ''}`; }
-  else return null;
-  return { seconds, displayText };
-}
-
 // ==================== TON API ====================
 async function getTransactions() {
   try {
@@ -187,12 +173,12 @@ async function sendNotification(chatId, txData, price) {
   const buyerDisplay = buyerInfo.display.length > 20 ? buyerInfo.display.substring(0, 17) + '...' : buyerInfo.display;
   const mc = calculateMC(price);
 
-  let caption, emoji;
+  let caption;
   if (txData.type === 'BUY') {
-    emoji = getRocketString(txData.volume);
+    const emoji = getRocketString(txData.volume);
     caption = `<b>NEW BUY!</b> ${emoji}\n\n💎 <b>${formatNumber(txData.volume)} TON</b>\n🦑 <a href="https://tonviewer.com/${buyerInfo.link}">${buyerDisplay}</a> | <a href="https://tonviewer.com/transaction/${txData.hash}">Txn</a>\n🌐 MC: ${mc}`;
   } else {
-    emoji = getHeartString(txData.volume);
+    const emoji = getHeartString(txData.volume);
     caption = `<b>NEW SELL!</b> ${emoji}\n\n💖 <b>${formatNumber(txData.volume)} TONDEV</b>\n🦑 <a href="https://tonviewer.com/${buyerInfo.link}">${buyerDisplay}</a> | <a href="https://tonviewer.com/transaction/${txData.hash}">Txn</a>\n🌐 MC: ${mc}`;
   }
 
@@ -207,7 +193,7 @@ async function sendNotification(chatId, txData, price) {
   try {
     const tokenImage = await getTokenImage();
     if (tokenImage) await bot.sendPhoto(chatId, tokenImage, { caption, parse_mode: 'HTML', reply_markup: keyboard });
-    else await bot.sendMessage(chatId, caption, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: keyboard });
+    else await bot.sendMessage(chatId, caption, { parse_mode: 'HTML', disable_web_page_preview: false, reply_markup: keyboard });
   } catch (error) { console.error('Error sending notification:', error.message); }
 }
 
@@ -238,16 +224,12 @@ async function monitorTransactions() {
   }
 }
 
-// ==================== /start с лимитом ====================
-bot.onText(/\/start/, (msg) => {
+// ==================== КОМАНДА /START ====================
+bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
-  console.log('START command received from chat:', chatId);
 
-  notificationChats.add(chatId);
-
-  if (!chatSettings[chatId]) {
-    chatSettings[chatId] = { minBuyThreshold: 5 };
-  }
+  if (!notificationChats.has(chatId)) notificationChats.add(chatId);
+  if (!chatSettings[chatId]) chatSettings[chatId] = { minBuyThreshold: 5 };
 
   const settings = chatSettings[chatId];
 
@@ -257,11 +239,15 @@ CA: <code>${TOKEN_ADDRESS}</code>
 🔹 Minimum buy threshold: <b>${settings.minBuyThreshold} TON</b>
 🔹 Notifications for this chat: <b>${notificationChats.has(chatId) ? 'ON' : 'OFF'}</b>
 
-💸 [Trade on @dtrade](https://t.me/dtrade?start=26RoWqxLlD_${TOKEN_ADDRESS})
-🏴 [Swap on Bidask](https://bidask.finance/en/app/swap/ton/${TOKEN_ADDRESS})
-  `;
+💸 <a href="https://t.me/dtrade?start=26RoWqxLlD_${TOKEN_ADDRESS}">Trade on @dtrade</a>
+🏴 <a href="https://bidask.finance/en/app/swap/ton/${TOKEN_ADDRESS}">Swap on Bidask</a>
+`;
 
-  bot.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: false });
+  try {
+    await bot.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: false });
+  } catch (error) {
+    console.error('Error sending /start message:', error.message);
+  }
 });
 
 // ==================== ЗАПУСК ====================
