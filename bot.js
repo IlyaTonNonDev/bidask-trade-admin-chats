@@ -158,21 +158,32 @@ function parseTransaction(tx, minThreshold, tokenPrice) {
       // на пул пришёл TON → покупка
       value = parseInt(decodedBody.native_amount) / 1e9;
       type = 'BUY';
-
       if (value < minThreshold) return null;
     } else if (decodedBody.jetton === TOKEN_ADDRESS) { 
       // на пул пришёл TONDEV → продажа
       const tonReceived = parseInt(decodedBody.amount) / 1e9 * tokenPrice; // пересчёт в TON
       value = parseInt(decodedBody.amount) / 1e9; // количество токена для отображения
       type = 'SELL';
-
       if (tonReceived < minThreshold) return null; // проверка порога по TON
     } else return null;
 
     const from = decodedBody.from_address || tx.in_msg.source?.address || 'Unknown';
     const to = decodedBody.to_address || 'Unknown';
 
-    return { volume: value,
+    return { 
+      volume: value,
+      from,
+      to,
+      type,
+      hash: tx.hash || '',
+      timestamp: tx.utime || 0
+    };
+  } catch (error) { 
+    console.error('Error parsing transaction:', error.message); 
+    return null; 
+  }
+}
+
 
 
 // ==================== УВЕДОМЛЕНИЯ ====================
