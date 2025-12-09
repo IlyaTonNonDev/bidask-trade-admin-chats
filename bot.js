@@ -1,6 +1,6 @@
 // Telegram Bot: CA info + Модерация (mute/unmute) + Мониторинг покупок и продаж
 const TelegramBot = require('node-telegram-bot-api');
-const fetch = require('node-fetch');
+const fetch = global.fetch; // В Node 18+ fetch встроен
 
 // ==================== КОНФИГУРАЦИЯ ====================
 const TOKEN_ADDRESS = 'EQDKMh511DOn02mL0nf0JrND0TlkUKmos17eK9zKyGAsjS1K';
@@ -148,45 +148,43 @@ async function getTokenImage() {
 // ==================== ПАРСИНГ ТРАНЗАКЦИЙ ====================
 function parseTransaction(tx, minThreshold, tokenPrice) {
   try {
-    if (!tx.in_msg) return null;
+    console.log('Parsing transaction:', tx.hash);
 
+    if (!tx.in_msg) return null;
     const opName = tx.in_msg.decoded_op_name;
     const decodedBody = tx.in_msg.decoded_body;
-
     if (opName !== 'bidask_damm_swap' || !decodedBody) return null;
 
-    let value, type, tonEquivalent;
+    let value, type;
 
-    if (decodedBody.native_amount) {
-      // Покупка: на пул пришёл TON
+    if (decodedBody.native_amount) { 
+      // на пул пришёл TON → покупка
       value = parseInt(decodedBody.native_amount) / 1e9;
-      tonEquivalent = value;
       type = 'BUY';
       if (value < minThreshold) return null;
-    } else if (decodedBody.jetton && decodedBody.jetton.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) {
-      // Продажа: на пул пришёл TONDEV
-      value = parseInt(decodedBody.amount) / 1e9;
-      if (!tokenPrice) {
-        console.log('Token price not available, skipping SELL');
-        return null;
-      }
-      tonEquivalent = value * tokenPrice;
+      console.log('BUY detected:', value);
+    } else if (decodedBody.jetton === TOKEN_ADDRESS) { 
+      // на пул пришёл TONDEV → продажа
+      const tonReceived = (parseInt(decodedBody.amount) / 1e9) * tokenPrice; // пересчёт в TON
+      value = parseInt(decodedBody.amount) / 1e9; // количество токена для отображения
       type = 'SELL';
-      if (tonEquivalent < minThreshold) return null;
+      console.log('SELL detected:', value, 'TON equivalent:', tonReceived);
+      if (tonReceived < minThreshold) return null; // проверка порога по TON
     } else return null;
 
     const from = decodedBody.from_address || tx.in_msg.source?.address || 'Unknown';
     const to = decodedBody.to_address || 'Unknown';
 
-    return { volume: value, from, to, type, tonEquivalent, hash: tx.hash || '', timestamp: tx.utime || 0 };
+    return { volume: value, from, to, type, hash: tx.hash || '', timestamp: tx.utime || 0 };
   } catch (error) {
     console.error('Error parsing transaction:', error.message);
     return null;
   }
 }
 
-// ==================== SEND NOTIFICATION ====================
+// ==================== УВЕДОМЛЕНИЯ ====================
 async function sendNotification(chatId, txData, price) {
+  console.log('Sending notification for tx:', txData.hash);
   const buyerInfo = await formatAddress(txData.from);
   const buyerDisplay = buyerInfo.display.length > 20 ? buyerInfo.display.substring(0, 17) + '...' : buyerInfo.display;
   const mc = calculateMC(price);
@@ -212,9 +210,7 @@ async function sendNotification(chatId, txData, price) {
     const tokenImage = await getTokenImage();
     if (tokenImage) await bot.sendPhoto(chatId, tokenImage, { caption, parse_mode: 'HTML', reply_markup: keyboard });
     else await bot.sendMessage(chatId, caption, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: keyboard });
-  } catch (error) {
-    console.error('Error sending notification:', error.message);
-  }
+  } catch (error) { console.error('Error sending notification:', error.message); }
 }
 
 // ==================== МОНИТОРИНГ ====================
@@ -223,29 +219,19 @@ let lastProcessedTimestamp = Math.floor(Date.now() / 1000) - 600;
 async function monitorTransactions() {
   try {
     if (!TON_API_KEY) return;
-
     const transactions = await getTransactions() || [];
     const price = await getTokenPrice();
-
-    if (!price) console.log('Warning: token price not loaded');
+    console.log('Fetched transactions:', transactions.length);
 
     for (const chatId of notificationChats) {
       const minThreshold = chatSettings[chatId]?.minBuyThreshold || 5;
-      console.log(`Monitoring chat ${chatId} with minThreshold ${minThreshold}`);
-
       for (const tx of transactions) {
         if (tx.utime <= lastProcessedTimestamp) continue;
-
-        console.log(`Processing tx ${tx.hash} at ${tx.utime}`);
         const txData = parseTransaction(tx, minThreshold, price);
-
         if (txData) {
-          console.log(`Sending notification: ${txData.type} of ${txData.volume} (${txData.tonEquivalent.toFixed(2)} TON equivalent)`);
+          console.log('Transaction passed threshold:', txData);
           await sendNotification(chatId, txData, price);
-
           if (txData.timestamp > lastProcessedTimestamp) lastProcessedTimestamp = txData.timestamp;
-        } else {
-          console.log('Tx skipped: below threshold or not relevant');
         }
       }
     }
@@ -254,73 +240,7 @@ async function monitorTransactions() {
   }
 }
 
-// ==================== CA INFO ====================
-function sendCAInfo(chatId) {
-  const message = `🏴 [SWAP ON BIDASK](https://bidask.finance/en/app/swap/ton/${TOKEN_ADDRESS})\n💸 [TRADE ON @dtrade](https://t.me/dtrade?start=26RoWqxLlD_${TOKEN_ADDRESS})\n\nCA: \`${TOKEN_ADDRESS}\``;
-  bot.sendMessage(chatId, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
-}
-
-// ==================== КОМАНДЫ ====================
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
-  notificationChats.add(chatId);
-  if (!chatSettings[chatId]) chatSettings[chatId] = { minBuyThreshold: 5 };
-  sendCAInfo(chatId);
-  if (TON_API_KEY) bot.sendMessage(chatId, `✅ <b>Buy/Sell Bot activated!</b>\nMinimum buy: <b>${chatSettings[chatId].minBuyThreshold} TON</b>\nNotifications will be sent to this chat.`, { parse_mode: 'HTML' });
-});
-
-bot.onText(/\/volume(?:\s+(\d+(?:\.\d+)?))?/, (msg, match) => {
-  const chatId = msg.chat.id;
-  if (!notificationChats.has(chatId)) return bot.sendMessage(chatId, 'Bot not activated in this chat. Use /start.');
-  const newVolume = match[1] ? parseFloat(match[1]) : null;
-  if (newVolume === null) return bot.sendMessage(chatId, `Current threshold: ${chatSettings[chatId].minBuyThreshold} TON`);
-  if (newVolume < 0.1 || newVolume > 10000) return bot.sendMessage(chatId, 'Volume must be 0.1–10000 TON');
-  chatSettings[chatId].minBuyThreshold = newVolume;
-  bot.sendMessage(chatId, `✅ Threshold changed to ${newVolume} TON`);
-});
-
-// /mute и /unmute
-async function restrictUser(msg, mute = true) {
-  try {
-    const chatId = msg.chat.id;
-    if (msg.chat.type === 'private') return bot.sendMessage(chatId, 'This command works only in group chats.');
-    if (!msg.reply_to_message) return bot.sendMessage(chatId, 'Reply to a message of the user to apply command.');
-    const fromId = msg.from.id;
-    const member = await bot.getChatMember(chatId, fromId);
-    if (!['creator', 'administrator'].includes(member.status)) return bot.sendMessage(chatId, 'Only admins can use this command.');
-    const targetUser = msg.reply_to_message.from;
-    if (!targetUser) return bot.sendMessage(chatId, 'Could not identify user.');
-
-    if (mute) {
-      const match = msg.text.match(/\/mute\s+(.+)/i);
-      const duration = match ? parseDuration(match[1]) : null;
-      if (!duration) return bot.sendMessage(chatId, 'Specify duration: /mute 30m');
-      await bot.restrictChatMember(chatId, targetUser.id, { until_date: Math.floor(Date.now()/1000)+duration.seconds, permissions: { can_send_messages: false } });
-      bot.sendMessage(chatId, `🔇 ${targetUser.first_name} muted for ${duration.displayText}`);
-    } else {
-      await bot.restrictChatMember(chatId, targetUser.id, { permissions: { can_send_messages: true, can_send_audios: true, can_send_documents: true, can_send_photos: true, can_send_videos: true, can_send_video_notes: true, can_send_voice_notes: true, can_send_polls: true, can_send_other_messages: true, can_add_web_page_previews: true, can_change_info: false, can_invite_users: true, can_pin_messages: false, can_manage_topics: false } });
-      bot.sendMessage(chatId, `✅ ${targetUser.first_name} unmuted`);
-    }
-  } catch (error) {
-    console.error('Error in restrictUser:', error.message);
-  }
-}
-
-bot.onText(/\/mute\s+(.+)/i, restrictUser);
-bot.onText(/\/unmute/i, (msg) => restrictUser(msg, false));
-
-bot.onText(/\/CA/i, (msg) => sendCAInfo(msg.chat.id));
-bot.onText(/\/status/i, (msg) => {
-  const chatId = msg.chat.id;
-  const uptime = process.uptime();
-  bot.sendMessage(chatId, `Bot active\nUptime: ${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m\nMin buy: ${chatSettings[chatId]?.minBuyThreshold || 5} TON`, { parse_mode: 'HTML' });
-});
-bot.onText(/\/help/i, (msg) => bot.sendMessage(msg.chat.id, 'Commands: /start, /CA, /status, /volume, /mute, /unmute, /help'));
-bot.on('message', (msg) => {
-  if (msg.text && msg.text.toUpperCase().includes('CA') && !msg.text.startsWith('/')) sendCAInfo(msg.chat.id);
-});
-
-// ==================== ЗАПУСК МОНИТОРИНГА ====================
+// ==================== ЗАПУСК ====================
 if (TON_API_KEY) setInterval(monitorTransactions, POLL_INTERVAL);
 
 console.log('Bot started. Send /start in your chat to activate notifications.');
