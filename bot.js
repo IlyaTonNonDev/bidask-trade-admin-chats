@@ -18,6 +18,9 @@ if (!TELEGRAM_BOT_TOKEN) {
 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
+// ==================== WHITELIST ====================
+const ALLOWED_USERS = [367102417]; // только этот user может использовать /start
+
 // ==================== ХРАНЕНИЕ НАСТРОЕК ====================
 const chatSettings = {}; // { chatId: { minBuyThreshold: 5 } }
 const notificationChats = new Set();
@@ -226,14 +229,24 @@ async function monitorTransactions() {
 
 // ==================== КОМАНДА /START ====================
 bot.onText(/\/start/, async (msg) => {
-  const chatId = msg.chat.id;
+    const userId = msg.from.id;
 
-  if (!notificationChats.has(chatId)) notificationChats.add(chatId);
-  if (!chatSettings[chatId]) chatSettings[chatId] = { minBuyThreshold: 5 };
+    // Access control
+    if (!ALLOWED_USERS.includes(userId)) {
+        return bot.sendMessage(
+            userId,
+            "⛔ У вас нет доступа к этому боту."
+        );
+    }
 
-  const settings = chatSettings[chatId];
+    const chatId = msg.chat.id;
 
-  const message = `
+    if (!notificationChats.has(chatId)) notificationChats.add(chatId);
+    if (!chatSettings[chatId]) chatSettings[chatId] = { minBuyThreshold: 5 };
+
+    const settings = chatSettings[chatId];
+
+    const message = `
 🏴 <b>Token Info</b>
 CA: <code>${TOKEN_ADDRESS}</code>
 🔹 Minimum buy threshold: <b>${settings.minBuyThreshold} TON</b>
@@ -243,11 +256,11 @@ CA: <code>${TOKEN_ADDRESS}</code>
 🏴 <a href="https://bidask.finance/en/app/swap/ton/${TOKEN_ADDRESS}">Swap on Bidask</a>
 `;
 
-  try {
-    await bot.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: true });
-  } catch (error) {
-    console.error('Error sending /start message:', error.message);
-  }
+    try {
+        await bot.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: true });
+    } catch (error) {
+        console.error('Error sending /start message:', error.message);
+    }
 });
 
 // ==================== ЗАПУСК ====================
