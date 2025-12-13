@@ -93,6 +93,33 @@ function calculateMC(price) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(price * TOTAL_SUPPLY);
 }
 
+// Нормализация адреса для сравнения (извлекает hash часть)
+function normalizeAddress(address) {
+  if (!address) return null;
+  // Если адрес в формате "workchain:hash", извлекаем hash
+  if (address.includes(':')) {
+    const parts = address.split(':');
+    return parts[parts.length - 1].replace(/^0x/, '').toLowerCase();
+  }
+  // Если просто hash, убираем префикс 0x
+  return address.replace(/^0x/, '').toLowerCase();
+}
+
+// Сравнение двух адресов (учитывает разные форматы)
+function addressesMatch(addr1, addr2) {
+  if (!addr1 || !addr2) return false;
+  const norm1 = normalizeAddress(addr1);
+  const norm2 = normalizeAddress(addr2);
+  
+  // Если нормализация вернула null или пустую строку, используем только прямое сравнение
+  if (!norm1 || !norm2 || norm1 === '' || norm2 === '') {
+    return addr1 === addr2;
+  }
+  
+  // Используем точное сравнение нормализованных адресов
+  return norm1 === norm2 || addr1 === addr2;
+}
+
 // ==================== TON API ====================
 async function getTransactions() {
   try {
@@ -144,25 +171,86 @@ function parseTransaction(tx, minThreshold, tokenPrice) {
     const decodedBody = tx.in_msg.decoded_body;
     if (opName !== 'bidask_damm_swap' || !decodedBody) return null;
 
-    let value, type;
+    let value, type, tondevAmount;
 
+    // Покупка: входящее сообщение содержит native TON на пул
     if (decodedBody.native_amount) { 
       value = parseInt(decodedBody.native_amount) / 1e9;
       type = 'BUY';
       if (value < minThreshold) return null;
       console.log('BUY detected:', value);
-    } else if (decodedBody.jetton === TOKEN_ADDRESS) { 
-      const tonReceived = (parseInt(decodedBody.amount) / 1e9) * tokenPrice;
-      value = parseInt(decodedBody.amount) / 1e9;
+    } 
+    // Продажа: входящее сообщение содержит jetton transfer с TONDEV на пул
+    else if (decodedBody.jetton === TOKEN_ADDRESS) { 
+      // Количество проданных TONDEV (для отображения)
+      tondevAmount = parseInt(decodedBody.amount) / 1e9;
+      
+      // Найти исходящее сообщение с TON от пула к продавцу
+      const sellerAddress = decodedBody.from_address || tx.in_msg.source?.address;
+      if (!sellerAddress) {
+        console.log('SELL detected but no seller address found');
+        return null;
+      }
+
+      // Ищем исходящее сообщение с TON, адресованное продавцу
+      let tonReceived = null;
+      
+      // Проверяем out_msgs
+      if (tx.out_msgs && Array.isArray(tx.out_msgs)) {
+        for (const outMsg of tx.out_msgs) {
+          // Проверяем, что сообщение адресовано продавцу
+          const destination = outMsg.destination?.address || outMsg.destination;
+          if (destination && addressesMatch(destination, sellerAddress)) {
+            // Проверяем value (native TON) - это не jetton transfer
+            if (outMsg.value && !outMsg.jetton) {
+              tonReceived = parseInt(outMsg.value) / 1e9;
+              break;
+            }
+          }
+        }
+      }
+
+      // Если не нашли в out_msgs, проверяем actions (альтернативный способ)
+      if (tonReceived === null && tx.actions && Array.isArray(tx.actions)) {
+        for (const action of tx.actions) {
+          // Ищем действие отправки TON (не jetton)
+          if (action.type === 'TonTransfer' || (action.TonTransfer && !action.JettonTransfer)) {
+            const actionDestination = action.destination?.address || action.TonTransfer?.destination?.address;
+            if (actionDestination && addressesMatch(actionDestination, sellerAddress)) {
+              const actionValue = action.amount || action.TonTransfer?.amount || action.value;
+              if (actionValue) {
+                tonReceived = parseInt(actionValue) / 1e9;
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      if (tonReceived === null) {
+        console.log('SELL detected but no TON out message found for seller');
+        return null;
+      }
+
+      // Порог применяется к сумме TON, которую получил продавец
+      value = tonReceived;
       type = 'SELL';
-      console.log('SELL detected:', value, 'TON equivalent:', tonReceived);
-      if (tonReceived < minThreshold) return null;
+      console.log('SELL detected:', tondevAmount, 'TONDEV sold,', value, 'TON received');
+      if (value < minThreshold) return null;
     } else return null;
 
     const from = decodedBody.from_address || tx.in_msg.source?.address || 'Unknown';
     const to = decodedBody.to_address || 'Unknown';
 
-    return { volume: value, from, to, type, hash: tx.hash || '', timestamp: tx.utime || 0 };
+    // Для продажи volume - это количество TONDEV (для отображения), но проверка порога уже выполнена по TON
+    return { 
+      volume: type === 'SELL' ? tondevAmount : value, 
+      from, 
+      to, 
+      type, 
+      hash: tx.hash || '', 
+      timestamp: tx.utime || 0 
+    };
   } catch (error) {
     console.error('Error parsing transaction:', error.message);
     return null;
