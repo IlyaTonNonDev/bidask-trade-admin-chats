@@ -25,6 +25,14 @@ const ALLOWED_USERS = [367102417]; // только этот user может ис
 // ==================== ХРАНЕНИЕ НАСТРОЕК ====================
 const chatSettings = {}; // { chatId: { minBuyThreshold: 5 } }
 const notificationChats = new Set();
+const autoRegisteredChats = new Set(); // Чаты, автоматически зарегистрированные как админские
+
+// ==================== КЭШИРОВАНИЕ ДЛЯ ОПТИМИЗАЦИИ ====================
+let cachedBotInfo = null; // Кэш информации о боте
+const adminCheckCache = new Map(); // Кэш проверок прав администратора: { chatId: { result: boolean, timestamp: number } }
+const CACHE_TTL = 5 * 60 * 1000; // 5 минут
+const CHECK_DEBOUNCE = 30 * 1000; // 30 секунд между проверками одного чата
+const lastCheckTimestamps = new Map(); // Время последней проверки для каждого чата
 
 // ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 function crc16(data) {
@@ -379,17 +387,17 @@ function parseTransaction(tx, minThreshold, tokenPrice) {
         if (tx.actions && Array.isArray(tx.actions)) {
           for (let i = 0; i < tx.actions.length; i++) {
             const action = tx.actions[i];
-            // Ищем действие отправки TON (не jetton)
-            if (action.type === 'TonTransfer' || (action.TonTransfer && !action.JettonTransfer)) {
-              const actionDestination = action.destination?.address || action.TonTransfer?.destination?.address;
+          // Ищем действие отправки TON (не jetton)
+          if (action.type === 'TonTransfer' || (action.TonTransfer && !action.JettonTransfer)) {
+            const actionDestination = action.destination?.address || action.TonTransfer?.destination?.address;
               const actionValue = action.amount || action.TonTransfer?.amount || action.value;
               console.log(`[2. PARSE_TRANSACTION]   action[${i}]: type=${action.type}, destination=${actionDestination?.substring(0, 20) || 'none'}..., amount=${actionValue || 'none'}`);
               if (actionDestination && addressesMatch(actionDestination, sellerAddress)) {
                 console.log(`[2. PARSE_TRANSACTION]   ✅ Destination matches seller in action!`);
-                if (actionValue) {
-                  tonReceived = parseInt(actionValue) / 1e9;
+              if (actionValue) {
+                tonReceived = parseInt(actionValue) / 1e9;
                   console.log(`[2. PARSE_TRANSACTION]   ✅ Found TON in action: ${tonReceived} TON`);
-                  break;
+                break;
                 }
               }
             }
@@ -596,6 +604,101 @@ async function isAdmin(chatId, userId) {
   }
 }
 
+// Получение информации о боте с кэшированием
+async function getBotInfo() {
+  if (!cachedBotInfo) {
+    cachedBotInfo = await bot.getMe();
+  }
+  return cachedBotInfo;
+}
+
+// Проверка, является ли бот администратором группы с правом отправки сообщений (с кэшированием)
+async function isBotAdminWithSendPermission(chatId) {
+  try {
+    if (chatId > 0) {
+      return false; // Личные чаты не нужны
+    }
+    
+    // Проверяем кэш
+    const cached = adminCheckCache.get(chatId);
+    if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+      return cached.result;
+    }
+    
+    // Дебаунсинг: если проверяли недавно, используем кэш или возвращаем false
+    const lastCheck = lastCheckTimestamps.get(chatId);
+    if (lastCheck && (Date.now() - lastCheck) < CHECK_DEBOUNCE) {
+      // Используем кэшированный результат, если есть, иначе возвращаем false
+      if (cached) {
+        return cached.result;
+      }
+      return false;
+    }
+    
+    lastCheckTimestamps.set(chatId, Date.now());
+    
+    const botInfo = await getBotInfo();
+    const member = await bot.getChatMember(chatId, botInfo.id);
+    
+    let result = false;
+    if (member.status === 'creator') {
+      result = true;
+    } else if (member.status === 'administrator') {
+      // Проверяем, что бот может отправлять сообщения
+      result = member.can_post_messages !== false && 
+               member.can_send_messages !== false &&
+               member.can_send_media_messages !== false;
+    }
+    
+    // Сохраняем в кэш (включая отрицательные результаты)
+    adminCheckCache.set(chatId, {
+      result,
+      timestamp: Date.now()
+    });
+    
+    // Очищаем старые записи из кэша (раз в ~100 проверок)
+    if (adminCheckCache.size > 1000) {
+      const now = Date.now();
+      for (const [cachedChatId, cacheData] of adminCheckCache.entries()) {
+        if (now - cacheData.timestamp > CACHE_TTL) {
+          adminCheckCache.delete(cachedChatId);
+        }
+      }
+    }
+    
+    return result;
+  } catch (error) {
+    console.error(`[isBotAdminWithSendPermission] Error:`, error.message);
+    // При ошибке не кэшируем, чтобы попробовать еще раз
+    return false;
+  }
+}
+
+// Автоматическая регистрация группы, если бот является администратором
+async function autoRegisterChatIfAdmin(chatId) {
+  if (chatId > 0) {
+    return; // Пропускаем личные чаты
+  }
+  
+  if (notificationChats.has(chatId)) {
+    return; // Уже зарегистрирован
+  }
+  
+  try {
+    const isAdmin = await isBotAdminWithSendPermission(chatId);
+    if (isAdmin) {
+      notificationChats.add(chatId);
+      autoRegisteredChats.add(chatId);
+      if (!chatSettings[chatId]) {
+        chatSettings[chatId] = { minBuyThreshold: 5 };
+      }
+      console.log(`[AUTO_REGISTER] ✅ Auto-registered group chat ${chatId} (bot is admin)`);
+    }
+  } catch (error) {
+    console.error(`[AUTO_REGISTER] Error checking chat ${chatId}:`, error.message);
+  }
+}
+
 // ==================== КОМАНДА /START ====================
 bot.onText(/\/start/, async (msg) => {
     const userId = msg.from.id;
@@ -611,8 +714,8 @@ bot.onText(/\/start/, async (msg) => {
         try {
             await bot.sendMessage(
                 chatId,
-                "⛔ У вас нет доступа к этому боту."
-            );
+            "⛔ У вас нет доступа к этому боту."
+        );
             console.log(`[/START] ✅ Denied message sent to chat ${chatId}`);
         } catch (error) {
             console.error(`[/START] ❌ Error sending denied message:`, error.message);
@@ -622,15 +725,18 @@ bot.onText(/\/start/, async (msg) => {
 
     console.log(`[/START] ✅ Access granted for user ${userId}`);
 
-    // Добавляем только групповые чаты (chatId < 0), личные сообщения игнорируем
+    // Автоматически регистрируем группу, если бот является администратором
     if (chatId < 0) {
+        await autoRegisterChatIfAdmin(chatId);
+        
+        // Если не удалось автоматически зарегистрировать, добавляем вручную
         if (!notificationChats.has(chatId)) {
             notificationChats.add(chatId);
-            console.log(`[/START] ✅ Group chat ${chatId} added to notification list`);
+            console.log(`[/START] ✅ Group chat ${chatId} added to notification list (manual)`);
         }
     } else {
         console.log(`[/START] ⚠️ Personal chat ${chatId} ignored - notifications only work in groups`);
-        await bot.sendMessage(chatId, "⚠️ Уведомления работают только в группах. Добавьте бота в группу и активируйте его там командой /start.", { parse_mode: 'HTML' });
+        await bot.sendMessage(chatId, "⚠️ Уведомления работают только в группах. Добавьте бота в группу как администратора с правом отправки сообщений.", { parse_mode: 'HTML' });
         // Не прерываем выполнение, показываем информацию о токене
     }
     if (!chatSettings[chatId]) chatSettings[chatId] = { minBuyThreshold: 5 };
@@ -838,9 +944,22 @@ bot.onText(/\/unmute$/i, async (msg) => {
     }
 });
 
+// ==================== ОБРАБОТЧИК СООБЩЕНИЙ ДЛЯ АВТОРЕГИСТРАЦИИ ====================
+// Обработчик всех сообщений для автоматической регистрации групп
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    
+    // Автоматически регистрируем группу, если бот является администратором
+    // Проверяем только если чат еще не зарегистрирован
+    if (chatId < 0 && !notificationChats.has(chatId)) {
+        await autoRegisterChatIfAdmin(chatId);
+    }
+});
+
 // ==================== ЗАПУСК ====================
 if (TON_API_KEY) setInterval(monitorTransactions, POLL_INTERVAL);
 
-console.log('Bot started. Send /start in your chat to activate notifications.');
+console.log('Bot started. Bot will automatically send notifications to groups where it is an admin with send permissions.');
+console.log('You can also use /start command to manually activate notifications.');
 process.on('unhandledRejection', console.error);
 process.on('SIGINT', () => { console.log('Bot stopped'); process.exit(0); });
