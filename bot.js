@@ -1,6 +1,8 @@
 // Telegram Bot: CA info + Модерация (mute/unmute) + Мониторинг покупок и продаж
 require('dotenv').config({ path: './secretkeys.env' });
 const TelegramBot = require('node-telegram-bot-api');
+const fs = require('fs').promises;
+const path = require('path');
 const fetch = global.fetch; // В Node 18+ fetch встроен
 
 // ==================== КОНФИГУРАЦИЯ ====================
@@ -26,6 +28,9 @@ const ALLOWED_USERS = [367102417]; // только этот user может ис
 const chatSettings = {}; // { chatId: { minBuyThreshold: 5 } }
 const notificationChats = new Set();
 const autoRegisteredChats = new Set(); // Чаты, автоматически зарегистрированные как админские
+
+// Файлы для сохранения состояния
+const STATE_FILE = path.join(__dirname, 'bot_state.json');
 
 // ==================== КЭШИРОВАНИЕ ДЛЯ ОПТИМИЗАЦИИ ====================
 let cachedBotInfo = null; // Кэш информации о боте
@@ -674,6 +679,51 @@ async function isBotAdminWithSendPermission(chatId) {
   }
 }
 
+// Сохранение состояния в файл
+async function saveState() {
+  try {
+    const state = {
+      notificationChats: Array.from(notificationChats),
+      autoRegisteredChats: Array.from(autoRegisteredChats),
+      chatSettings: chatSettings
+    };
+    await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+    console.log(`[SAVE_STATE] ✅ State saved: ${notificationChats.size} chats`);
+  } catch (error) {
+    console.error(`[SAVE_STATE] ❌ Error saving state:`, error.message);
+  }
+}
+
+// Загрузка состояния из файла
+async function loadState() {
+  try {
+    const data = await fs.readFile(STATE_FILE, 'utf8');
+    const state = JSON.parse(data);
+    
+    if (state.notificationChats && Array.isArray(state.notificationChats)) {
+      state.notificationChats.forEach(chatId => notificationChats.add(chatId));
+    }
+    
+    if (state.autoRegisteredChats && Array.isArray(state.autoRegisteredChats)) {
+      state.autoRegisteredChats.forEach(chatId => autoRegisteredChats.add(chatId));
+    }
+    
+    if (state.chatSettings && typeof state.chatSettings === 'object') {
+      Object.assign(chatSettings, state.chatSettings);
+    }
+    
+    console.log(`[LOAD_STATE] ✅ State loaded: ${notificationChats.size} chats`);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      console.log(`[LOAD_STATE] ℹ️ No state file found, starting fresh`);
+    } else {
+      console.error(`[LOAD_STATE] ❌ Error loading state:`, error.message);
+    }
+    return false;
+  }
+}
+
 // Автоматическая регистрация группы, если бот является администратором
 async function autoRegisterChatIfAdmin(chatId) {
   if (chatId > 0) {
@@ -692,6 +742,7 @@ async function autoRegisterChatIfAdmin(chatId) {
       if (!chatSettings[chatId]) {
         chatSettings[chatId] = { minBuyThreshold: 5 };
       }
+      await saveState(); // Сохраняем состояние после добавления
       console.log(`[AUTO_REGISTER] ✅ Auto-registered group chat ${chatId} (bot is admin)`);
     }
   } catch (error) {
@@ -732,6 +783,10 @@ bot.onText(/\/start/, async (msg) => {
         // Если не удалось автоматически зарегистрировать, добавляем вручную
         if (!notificationChats.has(chatId)) {
             notificationChats.add(chatId);
+            if (!chatSettings[chatId]) {
+                chatSettings[chatId] = { minBuyThreshold: 5 };
+            }
+            await saveState(); // Сохраняем состояние после добавления
             console.log(`[/START] ✅ Group chat ${chatId} added to notification list (manual)`);
         }
     } else {
@@ -957,9 +1012,20 @@ bot.on('message', async (msg) => {
 });
 
 // ==================== ЗАПУСК ====================
+// Загружаем сохраненное состояние при старте
+(async () => {
+  await loadState();
+  
 if (TON_API_KEY) setInterval(monitorTransactions, POLL_INTERVAL);
 
-console.log('Bot started. Bot will automatically send notifications to groups where it is an admin with send permissions.');
-console.log('You can also use /start command to manually activate notifications.');
+  console.log('Bot started. Bot will automatically send notifications to groups where it is an admin with send permissions.');
+  console.log('You can also use /start command to manually activate notifications.');
+  console.log(`Currently registered chats: ${notificationChats.size}`);
+})();
+
 process.on('unhandledRejection', console.error);
-process.on('SIGINT', () => { console.log('Bot stopped'); process.exit(0); });
+process.on('SIGINT', async () => { 
+  await saveState(); 
+  console.log('Bot stopped'); 
+  process.exit(0); 
+});

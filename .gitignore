@@ -5,3 +5,4 @@ secretkeys.env
 bot.log
 .DS_Store
 *.env
+bot_state.json
