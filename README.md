@@ -4,7 +4,7 @@ Telegram bot for monitoring TON token purchases on BidAsk DEX with moderation fe
 
 ## Features
 
-- **Buy Notifications**: Monitors BidAsk pool and sends notifications for purchases above threshold
+- **Buy Notifications**: Monitors Bidask pool and sends notifications for purchases above threshold
 - **CA Info**: Shows contract address with swap links
 - **Moderation**: Mute/unmute users in group chats (admin only)
 
