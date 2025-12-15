@@ -23,8 +23,8 @@ Telegram bot for monitoring TON token purchases on BidAsk DEX with moderation fe
 ## Setup
 
 1. Clone this repository
-2. Copy `.env.example` to `.env`
-3. Fill in your tokens:
+2. Copy `secretkeys.env.example` to `secretkeys.env`
+3. Fill in your tokens in `secretkeys.env`:
    - `TELEGRAM_BOT_TOKEN` - Get from [@BotFather](https://t.me/BotFather)
    - `TON_API_KEY` - Get from [TON Console](https://tonconsole.com)
 4. Install dependencies: `npm install`
