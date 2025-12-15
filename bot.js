@@ -226,9 +226,14 @@ function parseTransaction(tx, minThreshold, tokenPrice) {
       return null;
     }
     
-    // Для jetton_transfer и jetton_notify нужно проверить forward_payload
+    // Для bidask_damm_swap используем decodedBody напрямую (покупки)
+    // Для jetton_transfer и jetton_notify нужно проверить forward_payload (продажи)
     let actualDecodedBody = decodedBody;
-    if ((opName === 'jetton_transfer' || opName === 'jetton_notify') && decodedBody.forward_payload) {
+    if (opName === 'bidask_damm_swap') {
+      // Для покупок decodedBody уже содержит нужные данные
+      actualDecodedBody = decodedBody;
+      console.log(`[2. PARSE_TRANSACTION] 🔍 bidask_damm_swap detected (BUY), using decodedBody directly`);
+    } else if ((opName === 'jetton_transfer' || opName === 'jetton_notify') && decodedBody.forward_payload) {
       // Для jetton transfer/notify, bidask_damm_swap находится в forward_payload
       console.log(`[2. PARSE_TRANSACTION] 🔍 ${opName} detected, checking forward_payload`);
       if (decodedBody.forward_payload.value?.value) {
@@ -277,6 +282,20 @@ function parseTransaction(tx, minThreshold, tokenPrice) {
         return null;
       }
       console.log(`[2. PARSE_TRANSACTION] ✅ BUY passed threshold: ${value} >= ${minThreshold}`);
+      
+      // Для покупки сразу возвращаем результат
+      const from = actualDecodedBody.from_address || tx.in_msg.source?.address || 'Unknown';
+      const to = actualDecodedBody.to_address || 'Unknown';
+      const result = { 
+        volume: value, 
+        from, 
+        to, 
+        type, 
+        hash: tx.hash || '', 
+        timestamp: tx.utime || 0 
+      };
+      console.log(`[2. PARSE_TRANSACTION] ✅ Parsed successfully: ${JSON.stringify(result)}`);
+      return result;
     } 
     // Продажа: входящее сообщение содержит jetton transfer/notify с TONDEV на пул
     // Для bidask_damm_swap проверяем jetton, для jetton_transfer/jetton_notify это уже продажа по определению

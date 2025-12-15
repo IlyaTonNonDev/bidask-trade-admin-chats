@@ -2,5 +2,6 @@ node_modules/
 .env
 secretkeys.env
 *.log
+bot.log
 .DS_Store
 *.env
