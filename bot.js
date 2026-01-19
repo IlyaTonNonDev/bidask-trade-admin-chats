@@ -1283,8 +1283,6 @@ bot.onText(/\/start/, async (msg) => {
     const username = msg.from.username || 'no username';
 
     console.log(`[/START] 🔔 Command received from user ${userId} (@${username}) in chat ${chatId}`);
-    console.log(`[/START] 📋 ALLOWED_USERS: ${JSON.stringify(ALLOWED_USERS)}`);
-
     // Access control: в группах — только админы, в личке — разрешаем
     if (chatId < 0 && !(await isAdmin(chatId, userId))) {
         console.log(`[/START] ❌ Access denied for user ${userId}`);
