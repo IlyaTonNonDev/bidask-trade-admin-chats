@@ -1318,8 +1318,8 @@ bot.onText(/\/start/, async (msg) => {
         }
     } else {
         console.log(`[/START] ⚠️ Personal chat ${chatId} ignored - notifications only work in groups`);
-        await bot.sendMessage(chatId, "⚠️ Уведомления работают только в группах. Добавьте бота в группу как администратора с правом отправки сообщений.", { parse_mode: 'HTML' });
-        // Не прерываем выполнение, показываем информацию о токене
+        await bot.sendMessage(chatId, "⚠️ Уведомления работают только в группах. Добавьте бота в группу как администратора и используйте там /settoken и /setpool.", { parse_mode: 'HTML' });
+        return;
     }
     const settings = chatSettings[chatId];
     const cfg = chatConfigs[chatId];
