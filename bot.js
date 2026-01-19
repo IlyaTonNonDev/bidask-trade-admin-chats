@@ -1370,6 +1370,9 @@ bot.onText(/\/status$/i, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
+    if (chatId > 0) {
+        return bot.sendMessage(chatId, "⚠️ Эта команда доступна только в группах. Добавьте бота в группу и используйте команду там.");
+    }
     if (!(await isAdmin(chatId, userId))) {
         return bot.sendMessage(chatId, "⛔ Эта команда доступна только администраторам чата.");
     }
@@ -1407,6 +1410,9 @@ bot.onText(/\/volume(?:\s+(\d+(?:\.\d+)?))?/i, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
+    if (chatId > 0) {
+        return bot.sendMessage(chatId, "⚠️ Эта команда доступна только в группах. Добавьте бота в группу и используйте команду там.");
+    }
     if (!(await isAdmin(chatId, userId))) {
         return bot.sendMessage(chatId, "⛔ Эта команда доступна только администраторам чата.");
     }
@@ -1433,6 +1439,9 @@ bot.onText(/\/volume(?:\s+(\d+(?:\.\d+)?))?/i, async (msg, match) => {
 bot.onText(/\/settoken(?:\s+(\S+))?/i, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
+    if (chatId > 0) {
+        return bot.sendMessage(chatId, "⚠️ Настройка токена доступна только в группах. Добавьте бота в группу и используйте команду там.");
+    }
     if (!(await isAdmin(chatId, userId))) {
         return bot.sendMessage(chatId, "⛔ Эта команда доступна только администраторам чата.");
     }
@@ -1461,6 +1470,9 @@ bot.onText(/\/settoken(?:\s+(\S+))?/i, async (msg, match) => {
 bot.onText(/\/setpool(?:\s+(\S+))?/i, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
+    if (chatId > 0) {
+        return bot.sendMessage(chatId, "⚠️ Настройка пула доступна только в группах. Добавьте бота в группу и используйте команду там.");
+    }
     if (!(await isAdmin(chatId, userId))) {
         return bot.sendMessage(chatId, "⛔ Эта команда доступна только администраторам чата.");
     }
@@ -1484,19 +1496,21 @@ bot.onText(/\/help$/i, async (msg) => {
         return bot.sendMessage(chatId, "⛔ Эта команда доступна только администраторам чата.");
     }
 
-    const message = `📖 <b>Доступные команды</b>\n\n` +
-        `<b>Для всех:</b>\n` +
-        `/start - Активировать бота и показать информацию о токене\n\n` +
-        `<b>Только для администраторов:</b>\n` +
-        `/settoken <CA> - Установить адрес токена\n` +
-        `/setpool <адрес> - Установить адрес пула Bidask\n` +
-        `/ca - Показать адрес контракта (CA)\n` +
-        `/status - Показать статус бота\n` +
-        `/volume [число] - Показать/изменить минимальный порог (по умолчанию 5 TON)\n` +
-        `/mute [время] - Заглушить пользователя (ответьте на сообщение)\n` +
-        `/unmute - Разглушить пользователя (ответьте на сообщение)\n` +
-        `/help - Показать эту справку\n\n` +
-        `💡 Бот отправляет уведомления о покупках и продажах токена, превышающих минимальный порог.`;
+    const message = [
+        '🤖 <b>Что делает бот</b>',
+        'Отслеживает покупки и продажи токена в пулах Bidask, STON.fi и DeDust и присылает уведомления при превышении порога.',
+        '',
+        '📖 <b>Команды</b>',
+        '/start - Активировать бота и показать информацию о токене',
+        '/settoken <CA> - Установить адрес токена',
+        '/setpool <адрес> - Установить адрес пула Bidask',
+        '/ca - Показать адрес контракта (CA)',
+        '/status - Показать статус бота',
+        '/volume [число] - Показать/изменить минимальный порог (по умолчанию 5 TON)',
+        '/mute [время] - Заглушить пользователя (ответьте на сообщение)',
+        '/unmute - Разглушить пользователя (ответьте на сообщение)',
+        '/help - Показать эту справку'
+    ].join('\n');
 
     try {
         await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
@@ -1595,6 +1609,9 @@ bot.onText(/\/unmute$/i, async (msg) => {
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
+    if (chatId > 0) {
+        return;
+    }
 
     // Пошаговая настройка
     const pending = pendingSetup.get(chatId);
