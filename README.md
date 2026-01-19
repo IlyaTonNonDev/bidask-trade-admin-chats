@@ -1,6 +1,6 @@
 # TON Buy Bot
 
-Telegram bot for monitoring TON token trades on BidAsk, STON.fi, and DeDust with moderation features.
+Telegram bot for monitoring TON token trades on Bidask, STON.fi, and DeDust with moderation features.
 
 ## Features
 
