@@ -1435,7 +1435,7 @@ bot.onText(/\/volume(?:\s+(\d+(?:\.\d+)?))?/i, async (msg, match) => {
     }
 });
 
-bot.onText(/\/settoken(?:\s+(\S+))?/i, async (msg, match) => {
+bot.onText(/\/settoken(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
     if (chatId > 0) {
@@ -1465,7 +1465,7 @@ bot.onText(/\/settoken(?:\s+(\S+))?/i, async (msg, match) => {
     await bot.sendMessage(chatId, `✅ Токен обновлён: ${info.name || info.symbol || ca}\nStonfi пулов: ${chatConfigs[chatId].stonfiPools.length}\nDeDust пулов: ${chatConfigs[chatId].dedustPools.length}\nУкажите адрес пула Bidask через /setpool <адрес>`, { parse_mode: 'HTML' });
 });
 
-bot.onText(/\/setpool(?:\s+(\S+))?/i, async (msg, match) => {
+bot.onText(/\/setpool(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
     if (chatId > 0) {
