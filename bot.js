@@ -1323,8 +1323,7 @@ bot.onText(/\/start/, async (msg) => {
     const cfg = chatConfigs[chatId];
 
     if (!cfg.tokenAddress) {
-        pendingSetup.set(chatId, { step: 'token', adminId: userId });
-        await bot.sendMessage(chatId, "Укажите адрес токена (CA) для мониторинга:", { parse_mode: 'HTML' });
+        await bot.sendMessage(chatId, "Токен не настроен. Используйте /settoken <CA> в этом чате.", { parse_mode: 'HTML' });
         return;
     }
 
@@ -1448,8 +1447,7 @@ bot.onText(/\/settoken(?:\s+(\S+))?/i, async (msg, match) => {
     ensureChatConfig(chatId);
     const ca = match[1];
     if (!ca) {
-        pendingSetup.set(chatId, { step: 'token', adminId: userId });
-        return bot.sendMessage(chatId, "Укажите адрес токена (CA) для мониторинга:");
+        return bot.sendMessage(chatId, "❌ Укажите адрес токена. Формат: /settoken <CA>");
     }
     const info = await fetchJettonInfo(ca);
     if (!info) return bot.sendMessage(chatId, "❌ Не удалось получить данные токена. Проверьте CA и TON_API_KEY.");
@@ -1479,8 +1477,7 @@ bot.onText(/\/setpool(?:\s+(\S+))?/i, async (msg, match) => {
     ensureChatConfig(chatId);
     const pool = match[1];
     if (!pool) {
-        pendingSetup.set(chatId, { step: 'bidask', adminId: userId });
-        return bot.sendMessage(chatId, "Укажите адрес пула на Bidask:");
+        return bot.sendMessage(chatId, "❌ Укажите адрес пула. Формат: /setpool <адрес>");
     }
     chatConfigs[chatId].bidaskPool = pool;
     await saveState();
@@ -1502,14 +1499,16 @@ bot.onText(/\/help$/i, async (msg) => {
         '',
         '📖 <b>Команды</b>',
         '/start - Активировать бота и показать информацию о токене',
-        '/settoken <CA> - Установить адрес токена',
-        '/setpool <адрес> - Установить адрес пула Bidask',
+        '/settoken <CA> - Установить адрес токена (только с аргументом)',
+        '/setpool <адрес> - Установить адрес пула Bidask (только с аргументом)',
         '/ca - Показать адрес контракта (CA)',
         '/status - Показать статус бота',
         '/volume [число] - Показать/изменить минимальный порог (по умолчанию 5 TON)',
         '/mute [время] - Заглушить пользователя (ответьте на сообщение)',
         '/unmute - Разглушить пользователя (ответьте на сообщение)',
-        '/help - Показать эту справку'
+        '/help - Показать эту справку',
+        '',
+        '⚠️ Настройка токена и пула работает только через команды с аргументами.'
     ].join('\n');
 
     try {
@@ -1613,52 +1612,6 @@ bot.on('message', async (msg) => {
         return;
     }
 
-    // Пошаговая настройка
-    const pending = pendingSetup.get(chatId);
-    if (pending && pending.adminId === userId && msg.text && !msg.text.startsWith('/')) {
-        const text = msg.text.trim();
-        ensureChatConfig(chatId);
-        if (pending.step === 'token') {
-            const info = await fetchJettonInfo(text);
-            if (!info) {
-                await bot.sendMessage(chatId, "❌ Не удалось получить данные токена. Проверьте CA и повторите.");
-                return;
-            }
-            chatConfigs[chatId].tokenAddress = text;
-            chatConfigs[chatId].decimals = info.decimals;
-            chatConfigs[chatId].totalSupply = info.totalSupply;
-            chatConfigs[chatId].tokenImage = info.image;
-            chatConfigs[chatId].tokenName = info.name;
-            chatConfigs[chatId].tokenSymbol = info.symbol;
-            chatConfigs[chatId].stonfiPools = [];
-            chatConfigs[chatId].dedustPools = [];
-            pendingSetup.set(chatId, { step: 'bidask', adminId: userId });
-            await refreshPoolsForChat(chatId);
-            await saveState();
-            await bot.sendMessage(chatId, `✅ Токен принят: ${info.name || info.symbol || text}\nУкажите адрес пула на Bidask:`);
-            return;
-        }
-        if (pending.step === 'bidask') {
-            chatConfigs[chatId].bidaskPool = text;
-            pendingSetup.set(chatId, { step: 'threshold', adminId: userId });
-            await saveState();
-            await bot.sendMessage(chatId, "✅ Пул Bidask сохранён. Установите порог (TON), например 5:");
-            return;
-        }
-        if (pending.step === 'threshold') {
-            const num = parseFloat(text);
-            if (isNaN(num) || num <= 0) {
-                await bot.sendMessage(chatId, "❌ Неверное значение. Введите положительное число TON.");
-                return;
-            }
-            chatSettings[chatId].minBuyThreshold = num;
-            pendingSetup.delete(chatId);
-            await saveState();
-            await bot.sendMessage(chatId, `✅ Порог установлен: ${num} TON. Бот начнёт мониторинг.`);
-            return;
-        }
-    }
-    
     // Автоматически регистрируем группу, если бот является администратором
     // Проверяем только если чат еще не зарегистрирован
     if (chatId < 0 && !notificationChats.has(chatId)) {
