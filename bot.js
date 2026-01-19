@@ -12,6 +12,7 @@ const TON_ADDRESS = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TON_API_KEY = process.env.TON_API_KEY;
+const PRICE_CACHE_TTL = 60 * 1000;
 
 if (!TELEGRAM_BOT_TOKEN) {
   console.error('Error: TELEGRAM_BOT_TOKEN is not set');
@@ -208,8 +209,101 @@ async function getTokenPrice(tokenAddress) {
     });
     if (!response.ok) throw new Error(`Rates API error: ${response.status}`);
     const data = await response.json();
-    return data.rates?.[tokenAddress]?.prices?.USD || null;
+    const direct = data.rates?.[tokenAddress]?.prices?.USD || null;
+    if (direct) return direct;
+
+    // Fallback: find matching key if TON API returns another address format
+    const rates = data.rates || {};
+    const matchingKey = Object.keys(rates).find((key) => addressesMatch(key, tokenAddress));
+    if (matchingKey) {
+      return rates[matchingKey]?.prices?.USD || null;
+    }
+
+    console.warn(`[getTokenPrice] No USD price for token ${tokenAddress}`);
+    return null;
   } catch (error) { console.error('Error fetching price:', error.message); return null; }
+}
+
+function getCachedPrice(cfg) {
+  if (!cfg?.lastPriceUsd || !cfg?.lastPriceTs) return null;
+  if (Date.now() - cfg.lastPriceTs > PRICE_CACHE_TTL) return null;
+  return cfg.lastPriceUsd;
+}
+
+function setCachedPrice(cfg, priceUsd, source) {
+  if (!cfg) return;
+  cfg.lastPriceUsd = priceUsd;
+  cfg.lastPriceTs = Date.now();
+  cfg.lastPriceSource = source;
+}
+
+function derivePriceUsdFromSwap(swap, tonUsdPrice) {
+  if (!swap || !tonUsdPrice) return null;
+  const tonValue = swap.tonValue;
+  const tokenAmount = swap.tokenAmount;
+  if (!tonValue || !tokenAmount || tokenAmount <= 0) return null;
+  const priceUsd = (tonValue / tokenAmount) * tonUsdPrice;
+  return Number.isFinite(priceUsd) && priceUsd > 0 ? priceUsd : null;
+}
+
+async function getTokenPriceFromPools(cfg) {
+  if (!cfg?.tokenAddress) return null;
+  const tonUsd = await getTokenPrice(TON_ADDRESS);
+  if (!tonUsd) return null;
+
+  const pools = [
+    cfg.bidaskPool,
+    ...(cfg.stonfiPools || []),
+    ...(cfg.dedustPools || [])
+  ].filter(Boolean);
+  if (pools.length === 0) return null;
+
+  for (const pool of pools) {
+    const dexHint =
+      pool === cfg.bidaskPool ? 'bidask' :
+      (cfg.stonfiPools || []).includes(pool) ? 'stonfi' :
+      (cfg.dedustPools || []).includes(pool) ? 'dedust' :
+      null;
+    const poolMeta = (cfg.stonfiPoolsMeta && cfg.stonfiPoolsMeta[pool]) ? cfg.stonfiPoolsMeta[pool] : null;
+    const transactions = await getTransactions(pool) || [];
+    transactions.sort((a, b) => (b.utime || 0) - (a.utime || 0));
+
+    for (const tx of transactions) {
+      const opName = tx.in_msg?.decoded_op_name;
+      const decodedBody = tx.in_msg?.decoded_body;
+      let swap = null;
+      if (decodedBody) {
+        swap = parseSwapFromDecodedBody(decodedBody, 0, cfg.tokenAddress, cfg.decimals || 9, opName, dexHint, poolMeta);
+      }
+      if (!swap) {
+        swap = parseSwapFromActions(tx, 0, cfg.tokenAddress, cfg.decimals || 9, dexHint);
+      }
+      const priceUsd = derivePriceUsdFromSwap(swap, tonUsd);
+      if (priceUsd) return priceUsd;
+    }
+  }
+
+  return null;
+}
+
+async function getTokenPriceWithFallback(chatId, cfg) {
+  const cached = getCachedPrice(cfg);
+  if (cached) return cached;
+
+  const direct = await getTokenPrice(cfg.tokenAddress);
+  if (direct) {
+    setCachedPrice(cfg, direct, 'tonapi');
+    return direct;
+  }
+
+  const derived = await getTokenPriceFromPools(cfg);
+  if (derived) {
+    setCachedPrice(cfg, derived, 'pool');
+    return derived;
+  }
+
+  console.warn(`[getTokenPriceWithFallback] No price for chat ${chatId}, token ${cfg.tokenAddress}`);
+  return null;
 }
 
 const tokenImageCache = new Map();
@@ -1036,7 +1130,7 @@ async function monitorTransactions() {
         continue;
       }
 
-      const price = await getTokenPrice(cfg.tokenAddress);
+      const price = await getTokenPriceWithFallback(chatId, cfg);
       
       const minThreshold = chatSettings[chatId]?.minBuyThreshold || 5;
       console.log(`[MONITOR] 💬 Processing chat ${chatId} with threshold ${minThreshold} TON, pools=${pools.length}`);
@@ -1381,7 +1475,7 @@ bot.onText(/\/status$/i, async (msg) => {
         return bot.sendMessage(chatId, "Токен не настроен. Укажите CA через /settoken.", { parse_mode: 'HTML' });
     }
     const isMonitoring = notificationChats.has(chatId);
-    const price = await getTokenPrice(cfg.tokenAddress);
+    const price = await getTokenPriceWithFallback(chatId, cfg);
     const mc = calculateMC(price, cfg.totalSupply);
 
     const message = `📊 <b>Bot Status</b>\n\n` +
@@ -1446,8 +1540,7 @@ bot.onText(/\/settoken(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
     }
     ensureChatConfig(chatId);
     const text = (msg.text || '').trim();
-    const parts = text.split(/\s+/);
-    const ca = match[1] || parts[1];
+    const ca = text.replace(/^\/settoken(@\w+)?\s+/i, '').trim();
     if (!ca) {
         return bot.sendMessage(chatId, "❌ Укажите адрес токена. Формат: /settoken CA");
     }
@@ -1479,8 +1572,7 @@ bot.onText(/\/setpool(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
     }
     ensureChatConfig(chatId);
     const text = (msg.text || '').trim();
-    const parts = text.split(/\s+/);
-    const pool = match[1] || parts[1];
+    const pool = text.replace(/^\/setpool(@\w+)?\s+/i, '').trim();
     if (!pool) {
         return bot.sendMessage(chatId, "❌ Укажите адрес пула. Формат: /setpool &lt;адрес&gt;");
     }
