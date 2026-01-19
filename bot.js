@@ -1263,6 +1263,12 @@ async function autoRegisterChatIfAdmin(chatId) {
         chatSettings[chatId] = { minBuyThreshold: 5 };
       }
       await saveState(); // Сохраняем состояние после добавления
+      const welcomeText = [
+        'Я отслеживаю покупки/продажи токена на Bidask, STON.fi и DeDust.',
+        '/settoken <CA> — указать токен',
+        '/setpool <адрес> — указать пул Bidask'
+      ].join('\n');
+      await bot.sendMessage(chatId, welcomeText, { parse_mode: 'HTML' });
       console.log(`[AUTO_REGISTER] ✅ Auto-registered group chat ${chatId} (bot is admin)`);
     }
   } catch (error) {
