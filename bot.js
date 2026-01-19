@@ -28,7 +28,6 @@ const chatSettings = {}; // { chatId: { minBuyThreshold: 5 } }
 const chatConfigs = {}; // { chatId: { tokenAddress, bidaskPool, stonfiPools:[], dedustPools:[], decimals, totalSupply, tokenImage, tokenName, tokenSymbol } }
 const notificationChats = new Set();
 const autoRegisteredChats = new Set(); // Чаты, автоматически зарегистрированные как админские
-const pendingSetup = new Map(); // chatId -> { step, adminId }
 
 function ensureChatConfig(chatId) {
   if (!chatSettings[chatId]) chatSettings[chatId] = { minBuyThreshold: 5 };
@@ -983,10 +982,10 @@ function shouldDiscover(chatId) {
   return Date.now() - last > POOL_DISCOVERY_INTERVAL;
 }
 
-async function refreshPoolsForChat(chatId) {
+async function refreshPoolsForChat(chatId, force = false) {
   const cfg = chatConfigs[chatId];
   if (!cfg || !cfg.tokenAddress) return;
-  if (!shouldDiscover(chatId)) return;
+  if (!force && !shouldDiscover(chatId)) return;
   const stonfi = await fetchStonfiPools(cfg.tokenAddress);
   const dedust = await fetchDedustPools(cfg.tokenAddress);
   cfg.stonfiPools = stonfi.map(p => p.address);
@@ -1265,8 +1264,8 @@ async function autoRegisterChatIfAdmin(chatId) {
       await saveState(); // Сохраняем состояние после добавления
       const welcomeText = [
         'Я отслеживаю покупки/продажи токена на Bidask, STON.fi и DeDust.',
-        '/settoken <CA> — указать токен',
-        '/setpool <адрес> — указать пул Bidask'
+        '/settoken &lt;CA&gt; — указать токен',
+        '/setpool &lt;адрес&gt; — указать пул Bidask'
       ].join('\n');
       await bot.sendMessage(chatId, welcomeText, { parse_mode: 'HTML' });
       console.log(`[AUTO_REGISTER] ✅ Auto-registered group chat ${chatId} (bot is admin)`);
@@ -1323,7 +1322,7 @@ bot.onText(/\/start/, async (msg) => {
     const cfg = chatConfigs[chatId];
 
     if (!cfg.tokenAddress) {
-        await bot.sendMessage(chatId, "Токен не настроен. Используйте /settoken <CA> в этом чате.", { parse_mode: 'HTML' });
+        await bot.sendMessage(chatId, "Токен не настроен. Используйте /settoken &lt;CA&gt; в этом чате.", { parse_mode: 'HTML' });
         return;
     }
 
@@ -1438,6 +1437,7 @@ bot.onText(/\/volume(?:\s+(\d+(?:\.\d+)?))?/i, async (msg, match) => {
 bot.onText(/\/settoken(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
+    console.log(`[/SETTOKEN] 🔔 Command received from user ${userId} in chat ${chatId}: ${msg.text}`);
     if (chatId > 0) {
         return bot.sendMessage(chatId, "⚠️ Настройка токена доступна только в группах. Добавьте бота в группу и используйте команду там.");
     }
@@ -1449,7 +1449,7 @@ bot.onText(/\/settoken(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
     const parts = text.split(/\s+/);
     const ca = match[1] || parts[1];
     if (!ca) {
-        return bot.sendMessage(chatId, "❌ Укажите адрес токена. Формат: /settoken <CA>");
+        return bot.sendMessage(chatId, "❌ Укажите адрес токена. Формат: /settoken CA");
     }
     const info = await fetchJettonInfo(ca);
     if (!info) return bot.sendMessage(chatId, "❌ Не удалось получить данные токена. Проверьте CA и TON_API_KEY.");
@@ -1462,14 +1462,15 @@ bot.onText(/\/settoken(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
     // Сброс пулов для обновления
     chatConfigs[chatId].stonfiPools = [];
     chatConfigs[chatId].dedustPools = [];
-    await refreshPoolsForChat(chatId);
+    await refreshPoolsForChat(chatId, true);
     await saveState();
-    await bot.sendMessage(chatId, `✅ Токен обновлён: ${info.name || info.symbol || ca}\nStonfi пулов: ${chatConfigs[chatId].stonfiPools.length}\nDeDust пулов: ${chatConfigs[chatId].dedustPools.length}\nУкажите адрес пула Bidask через /setpool <адрес>`, { parse_mode: 'HTML' });
+    await bot.sendMessage(chatId, `✅ Токен обновлён: ${info.name || info.symbol || ca}\nStonfi пулов: ${chatConfigs[chatId].stonfiPools.length}\nDeDust пулов: ${chatConfigs[chatId].dedustPools.length}\nУкажите адрес пула Bidask через /setpool &lt;адрес&gt;`, { parse_mode: 'HTML' });
 });
 
 bot.onText(/\/setpool(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
+    console.log(`[/SETPOOL] 🔔 Command received from user ${userId} in chat ${chatId}: ${msg.text}`);
     if (chatId > 0) {
         return bot.sendMessage(chatId, "⚠️ Настройка пула доступна только в группах. Добавьте бота в группу и используйте команду там.");
     }
@@ -1481,7 +1482,7 @@ bot.onText(/\/setpool(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
     const parts = text.split(/\s+/);
     const pool = match[1] || parts[1];
     if (!pool) {
-        return bot.sendMessage(chatId, "❌ Укажите адрес пула. Формат: /setpool <адрес>");
+        return bot.sendMessage(chatId, "❌ Укажите адрес пула. Формат: /setpool &lt;адрес&gt;");
     }
     chatConfigs[chatId].bidaskPool = pool;
     await saveState();
@@ -1503,8 +1504,8 @@ bot.onText(/\/help$/i, async (msg) => {
         '',
         '📖 <b>Команды</b>',
         '/start - Активировать бота и показать информацию о токене',
-        '/settoken <CA> - Установить адрес токена (только с аргументом)',
-        '/setpool <адрес> - Установить адрес пула Bidask (только с аргументом)',
+        '/settoken &lt;CA&gt; - Установить адрес токена (только с аргументом)',
+        '/setpool &lt;адрес&gt; - Установить адрес пула Bidask (только с аргументом)',
         '/ca - Показать адрес контракта (CA)',
         '/status - Показать статус бота',
         '/volume [число] - Показать/изменить минимальный порог (по умолчанию 5 TON)',
@@ -1612,6 +1613,9 @@ bot.onText(/\/unmute$/i, async (msg) => {
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
+    if (msg.text && msg.text.startsWith('/')) {
+        console.log(`[MESSAGE] 📩 Command message in chat ${chatId} from ${userId}: ${msg.text}`);
+    }
     if (chatId > 0) {
         return;
     }
