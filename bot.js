@@ -20,8 +20,8 @@ if (!TELEGRAM_BOT_TOKEN) {
 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
-// ==================== WHITELIST ====================
-const ALLOWED_USERS = [367102417]; // только этот user может использовать /start
+// ==================== ДОСТУП ====================
+// /start разрешён любому администратору группы или пользователю в личном чате
 
 // ==================== ХРАНЕНИЕ НАСТРОЕК ====================
 const chatSettings = {}; // { chatId: { minBuyThreshold: 5 } }
@@ -1285,13 +1285,13 @@ bot.onText(/\/start/, async (msg) => {
     console.log(`[/START] 🔔 Command received from user ${userId} (@${username}) in chat ${chatId}`);
     console.log(`[/START] 📋 ALLOWED_USERS: ${JSON.stringify(ALLOWED_USERS)}`);
 
-    // Access control
-    if (!ALLOWED_USERS.includes(userId)) {
+    // Access control: в группах — только админы, в личке — разрешаем
+    if (chatId < 0 && !(await isAdmin(chatId, userId))) {
         console.log(`[/START] ❌ Access denied for user ${userId}`);
         try {
             await bot.sendMessage(
                 chatId,
-            "⛔ У вас нет доступа к этому боту."
+            "⛔ Эта команда доступна только администраторам чата."
         );
             console.log(`[/START] ✅ Denied message sent to chat ${chatId}`);
         } catch (error) {
