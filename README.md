@@ -1,10 +1,11 @@
 # TON Buy Bot
 
-Telegram bot for monitoring TON token purchases on BidAsk DEX with moderation features.
+Telegram bot for monitoring TON token trades on BidAsk, STON.fi, and DeDust with moderation features.
 
 ## Features
 
-- **Buy Notifications**: Monitors Bidask pool and sends notifications for purchases above threshold
+- **Buy/Sell Notifications**: Monitors BidAsk, STON.fi, and DeDust pools and sends notifications above threshold
+- **DEX Links**: Quick trade links in notifications (BidAsk, DTRADE, Graph)
 - **CA Info**: Shows contract address with swap links
 - **Moderation**: Mute/unmute users in group chats (admin only)
 
@@ -12,7 +13,9 @@ Telegram bot for monitoring TON token purchases on BidAsk DEX with moderation fe
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Activate bot and show CA |
+| `/start` | Activate bot and show token info |
+| `/settoken <CA>` | Set token contract address |
+| `/setpool <address>` | Set BidAsk pool address |
 | `/CA` | Show contract address |
 | `/status` | Check bot status |
 | `/volume [amount]` | Show/change minimum buy threshold |
@@ -32,7 +35,13 @@ Telegram bot for monitoring TON token purchases on BidAsk DEX with moderation fe
 
 ## Configuration
 
-Edit these values in `bot.js`:
+Use bot commands to configure each chat:
+
+- `/settoken <CA>` to set the token
+- `/setpool <address>` to set the BidAsk pool
+- `/volume [amount]` to set the minimum TON threshold
+
+If you still prefer hardcoded defaults, edit values in `bot.js`:
 
 ```javascript
 const TOKEN_ADDRESS = 'your_token_address';

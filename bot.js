@@ -6,10 +6,9 @@ const path = require('path');
 const fetch = global.fetch; // В Node 18+ fetch встроен
 
 // ==================== КОНФИГУРАЦИЯ ====================
-const TOKEN_ADDRESS = 'EQDKMh511DOn02mL0nf0JrND0TlkUKmos17eK9zKyGAsjS1K';
-const BIDASK_POOL_ADDRESS = '0:ece84060d087c39351665aacb8bc176f603248338af66e4f4ff13529bb594686';
-const TOTAL_SUPPLY = 1023257;
 const POLL_INTERVAL = 10000;
+const POOL_DISCOVERY_INTERVAL = 60 * 60 * 1000;
+const TON_ADDRESS = 'EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c';
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TON_API_KEY = process.env.TON_API_KEY;
@@ -26,8 +25,19 @@ const ALLOWED_USERS = [367102417]; // только этот user может ис
 
 // ==================== ХРАНЕНИЕ НАСТРОЕК ====================
 const chatSettings = {}; // { chatId: { minBuyThreshold: 5 } }
+const chatConfigs = {}; // { chatId: { tokenAddress, bidaskPool, stonfiPools:[], dedustPools:[], decimals, totalSupply, tokenImage, tokenName, tokenSymbol } }
 const notificationChats = new Set();
 const autoRegisteredChats = new Set(); // Чаты, автоматически зарегистрированные как админские
+const pendingSetup = new Map(); // chatId -> { step, adminId }
+
+function ensureChatConfig(chatId) {
+  if (!chatSettings[chatId]) chatSettings[chatId] = { minBuyThreshold: 5 };
+  if (!chatConfigs[chatId]) {
+    chatConfigs[chatId] = { stonfiPools: [], dedustPools: [], stonfiPoolsMeta: {}, dedustPoolsMeta: {} };
+  }
+  if (!chatConfigs[chatId].stonfiPoolsMeta) chatConfigs[chatId].stonfiPoolsMeta = {};
+  if (!chatConfigs[chatId].dedustPoolsMeta) chatConfigs[chatId].dedustPoolsMeta = {};
+}
 
 // Файлы для сохранения состояния
 const STATE_FILE = path.join(__dirname, 'bot_state.json');
@@ -102,9 +112,9 @@ function getHeartString(volume) {
 
 function formatNumber(num) { return new Intl.NumberFormat('en-US').format(num); }
 
-function calculateMC(price) {
-  if (!price) return '???';
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(price * TOTAL_SUPPLY);
+function calculateMC(price, totalSupply) {
+  if (!price || !totalSupply) return '???';
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(price * totalSupply);
 }
 
 // Нормализация адреса для сравнения (извлекает hash часть)
@@ -167,14 +177,14 @@ function addressesMatch(addr1, addr2) {
 }
 
 // ==================== TON API ====================
-async function getTransactions() {
+async function getTransactions(poolAddress) {
   try {
     if (!TON_API_KEY) {
       console.log('[1. GET_TRANSACTIONS] ❌ TON_API_KEY not set');
       return [];
     }
     console.log('[1. GET_TRANSACTIONS] 🔍 Fetching from TON API...');
-    const resp = await fetch(`https://tonapi.io/v2/blockchain/accounts/${BIDASK_POOL_ADDRESS}/transactions?limit=20`, {
+    const resp = await fetch(`https://tonapi.io/v2/blockchain/accounts/${poolAddress}/transactions?limit=20`, {
       headers: { 'Authorization': `Bearer ${TON_API_KEY}`, 'Content-Type': 'application/json' }
     });
     if (!resp.ok) {
@@ -191,51 +201,492 @@ async function getTransactions() {
   }
 }
 
-async function getTokenPrice() {
+async function getTokenPrice(tokenAddress) {
   try {
     if (!TON_API_KEY) return null;
-    const response = await fetch(`https://tonapi.io/v2/rates?tokens=${TOKEN_ADDRESS}&currencies=usd`, {
+    const response = await fetch(`https://tonapi.io/v2/rates?tokens=${tokenAddress}&currencies=usd`, {
       headers: { 'Authorization': `Bearer ${TON_API_KEY}`, 'Content-Type': 'application/json' }
     });
     if (!response.ok) throw new Error(`Rates API error: ${response.status}`);
     const data = await response.json();
-    return data.rates?.[TOKEN_ADDRESS]?.prices?.USD || null;
+    return data.rates?.[tokenAddress]?.prices?.USD || null;
   } catch (error) { console.error('Error fetching price:', error.message); return null; }
 }
 
-let cachedTokenImage = null;
-async function getTokenImage() {
-  if (cachedTokenImage) return cachedTokenImage;
+const tokenImageCache = new Map();
+async function getTokenImage(tokenAddress) {
+  if (tokenImageCache.has(tokenAddress)) return tokenImageCache.get(tokenAddress);
   if (!TON_API_KEY) return null;
   try {
-    const resp = await fetch(`https://tonapi.io/v2/jettons/${TOKEN_ADDRESS}`, {
+    const resp = await fetch(`https://tonapi.io/v2/jettons/${tokenAddress}`, {
       headers: { 'Authorization': `Bearer ${TON_API_KEY}`, 'Content-Type': 'application/json' }
     });
     if (!resp.ok) throw new Error(`Jetton API error: ${resp.status}`);
     const data = await resp.json();
     const imageUrl = data.metadata?.image || data.preview || null;
-    if (imageUrl) cachedTokenImage = imageUrl;
+    if (imageUrl) tokenImageCache.set(tokenAddress, imageUrl);
     return imageUrl;
   } catch (error) { console.error('Error fetching token logo:', error.message); return null; }
 }
 
+// Отправка сообщения с картинкой токена, если есть
+async function sendWithImage(chatId, text, tokenAddress, tokenImageOverride, extraOpts = {}) {
+  const opts = { parse_mode: 'HTML', disable_web_page_preview: true, ...extraOpts };
+  try {
+    const img = tokenImageOverride || await getTokenImage(tokenAddress);
+    if (img) {
+      await bot.sendPhoto(chatId, img, { caption: text, ...opts });
+    } else {
+      await bot.sendMessage(chatId, text, opts);
+    }
+  } catch (err) {
+    console.error('[sendWithImage] Error:', err.message);
+    await bot.sendMessage(chatId, text, opts);
+  }
+}
+
+async function fetchJettonInfo(tokenAddress) {
+  if (!TON_API_KEY) return null;
+  const url = `https://tonapi.io/v2/jettons/${tokenAddress}`;
+  try {
+    const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${TON_API_KEY}`, 'Content-Type': 'application/json' } });
+    if (!resp.ok) throw new Error(`Jetton API error: ${resp.status}`);
+    const data = await resp.json();
+    const decimals = parseInt(data.metadata?.decimals || '9', 10);
+    const supplyRaw = data.total_supply ? parseInt(data.total_supply) : null;
+    return {
+      decimals,
+      totalSupply: supplyRaw !== null ? supplyRaw / Math.pow(10, decimals) : null,
+      image: data.metadata?.image || data.preview || null,
+      name: data.metadata?.name || '',
+      symbol: data.metadata?.symbol || ''
+    };
+  } catch (err) {
+    console.error(`[fetchJettonInfo] Error: ${err.message}`);
+    return null;
+  }
+}
+
+async function fetchStonfiPools(tokenAddress) {
+  try {
+    const url = `https://api.ston.fi/v1/pools?jetton_address=${tokenAddress}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const pools = data?.pool_list || [];
+    return pools
+      .filter(p => tokenAddress === p.token0_address || tokenAddress === p.token1_address)
+      .map(p => ({
+        address: p.address,
+        token0_address: p.token0_address,
+        token1_address: p.token1_address
+      }));
+  } catch (error) {
+    console.error(`[fetchStonfiPools] Error: ${error.message}`);
+    return [];
+  }
+}
+
+async function fetchDedustPools(tokenAddress) {
+  try {
+    const url = `https://api.dedust.io/v2/pools?asset=jetton:${tokenAddress}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (!Array.isArray(data)) return [];
+    return data
+      .filter(p => Array.isArray(p.assets) && p.assets.some(a => a?.address === tokenAddress))
+      .map(p => p.address);
+  } catch (error) {
+    console.error(`[fetchDedustPools] Error: ${error.message}`);
+    return [];
+  }
+}
+
 // ==================== ПАРСИНГ ТРАНЗАКЦИЙ ====================
-function parseTransaction(tx, minThreshold, tokenPrice) {
+function extractAddressField(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object') return value.address || value.account?.address || value.wallet?.address || null;
+  return null;
+}
+
+function extractBigInt(value) {
+  try {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'bigint') return value;
+    if (typeof value === 'number' && Number.isFinite(value)) return BigInt(Math.trunc(value));
+    if (typeof value === 'string') {
+      const s = value.trim();
+      if (/^\d+$/.test(s)) return BigInt(s);
+    }
+    if (typeof value === 'object') {
+      // некоторые ответы могут заворачивать числа в { value: "..." }
+      if (value.value !== undefined) return extractBigInt(value.value);
+      if (value.amount !== undefined) return extractBigInt(value.amount);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function nanoToTon(nano) {
+  const bi = extractBigInt(nano);
+  if (bi === null) return null;
+  // для уведомлений достаточно Number; TON суммы обычно безопасны по диапазону
+  return Number(bi) / 1e9;
+}
+
+function unitsToNumber(raw, decimals) {
+  const bi = extractBigInt(raw);
+  if (bi === null) return null;
+  const div = Math.pow(10, decimals || 9);
+  return Number(bi) / div;
+}
+
+function detectAsset(asset) {
+  if (!asset) return { isTon: false, address: null };
+  if (typeof asset === 'string') {
+    const lower = asset.toLowerCase();
+    if (lower === 'ton' || lower === 'native' || lower === 'nanoton') return { isTon: true, address: null };
+    return { isTon: false, address: asset };
+  }
+  if (typeof asset === 'object') {
+    const type = (asset.type || asset.kind || asset.asset_type || '').toString().toLowerCase();
+    if (type === 'ton' || type === 'native') return { isTon: true, address: null };
+    if (asset.is_native === true || asset.isTon === true) return { isTon: true, address: null };
+    const addr =
+      extractAddressField(asset.address) ||
+      extractAddressField(asset.jetton) ||
+      extractAddressField(asset.token) ||
+      extractAddressField(asset.master) ||
+      extractAddressField(asset.jetton_master) ||
+      extractAddressField(asset.wallet) ||
+      extractAddressField(asset);
+    return { isTon: false, address: addr || null };
+  }
+  return { isTon: false, address: null };
+}
+
+function safeJson(obj, limit = 2000) {
+  try {
+    const str = JSON.stringify(obj);
+    return str.length > limit ? `${str.slice(0, limit)}...` : str;
+  } catch {
+    return '[unserializable]';
+  }
+}
+
+function isTonAddress(address) {
+  if (!address) return false;
+  return normalizeAddress(address) === normalizeAddress(TON_ADDRESS);
+}
+
+function parseSwapFromActions(tx, minThreshold, tokenAddress, tokenDecimals, dexHint) {
+  try {
+    const actions = Array.isArray(tx.actions) ? tx.actions : [];
+    if (actions.length === 0) return null;
+
+    const tokenNorm = normalizeAddress(tokenAddress);
+
+    for (const action of actions) {
+      if (!action || typeof action !== 'object') continue;
+
+      // Кандидат на swap: либо type JettonSwap, либо поле JettonSwap, либо любое поле с "swap" в имени
+      let swapObj = null;
+      if (action.JettonSwap && typeof action.JettonSwap === 'object') swapObj = action.JettonSwap;
+      if (!swapObj && action.type === 'JettonSwap') swapObj = action;
+      if (!swapObj) {
+        const key = Object.keys(action).find(k => k.toLowerCase().includes('swap') && typeof action[k] === 'object');
+        if (key) swapObj = action[key];
+      }
+      if (!swapObj || typeof swapObj !== 'object') continue;
+
+      const jettonIn = extractAddressField(swapObj.jetton_in) ||
+                       extractAddressField(swapObj.jettonIn) ||
+                       extractAddressField(swapObj.asset_in) ||
+                       extractAddressField(swapObj.assetIn) ||
+                       extractAddressField(swapObj.token_in) ||
+                       extractAddressField(swapObj.tokenIn) ||
+                       extractAddressField(swapObj.jetton_master_in) ||
+                       extractAddressField(swapObj.jettonMasterIn);
+
+      const jettonOut = extractAddressField(swapObj.jetton_out) ||
+                        extractAddressField(swapObj.jettonOut) ||
+                        extractAddressField(swapObj.asset_out) ||
+                        extractAddressField(swapObj.assetOut) ||
+                        extractAddressField(swapObj.token_out) ||
+                        extractAddressField(swapObj.tokenOut) ||
+                        extractAddressField(swapObj.jetton_master_out) ||
+                        extractAddressField(swapObj.jettonMasterOut);
+
+      const tonIn = nanoToTon(swapObj.ton_in ?? swapObj.tonIn ?? swapObj.native_in ?? swapObj.nativeIn ?? swapObj.in_ton ?? swapObj.inTon);
+      const tonOut = nanoToTon(swapObj.ton_out ?? swapObj.tonOut ?? swapObj.native_out ?? swapObj.nativeOut ?? swapObj.out_ton ?? swapObj.outTon);
+
+      const amountIn = extractBigInt(swapObj.amount_in ?? swapObj.amountIn ?? swapObj.in_amount ?? swapObj.inAmount ?? swapObj.offer_amount ?? swapObj.offerAmount);
+      const amountOut = extractBigInt(swapObj.amount_out ?? swapObj.amountOut ?? swapObj.out_amount ?? swapObj.outAmount ?? swapObj.ask_amount ?? swapObj.askAmount);
+
+      const jettonInNorm = jettonIn ? normalizeAddress(jettonIn) : null;
+      const jettonOutNorm = jettonOut ? normalizeAddress(jettonOut) : null;
+
+      const involvesToken = !!(tokenNorm && (tokenNorm === jettonInNorm || tokenNorm === jettonOutNorm));
+      if (!involvesToken) continue;
+
+      // BUY: TON -> token ; SELL: token -> TON
+      if (tonIn !== null && tonIn !== undefined && jettonOutNorm && tokenNorm === jettonOutNorm) {
+        const tokenAmount = amountOut ? unitsToNumber(amountOut, tokenDecimals) : null;
+        const tonValue = tonIn;
+        if (tonValue < minThreshold) continue;
+        return {
+          volume: tonValue,
+          tonValue,
+          tokenAmount,
+          from: extractAddressField(swapObj.user) || extractAddressField(swapObj.sender) || tx.in_msg?.source?.address || 'Unknown',
+          to: tx.in_msg?.destination?.address || 'Unknown',
+          type: 'BUY',
+          dex: dexHint || swapObj.dex || swapObj.platform || swapObj.exchange || null,
+          hash: tx.hash || '',
+          timestamp: tx.utime || 0
+        };
+      }
+
+      if (tonOut !== null && tonOut !== undefined && jettonInNorm && tokenNorm === jettonInNorm) {
+        const tokenAmount = amountIn ? unitsToNumber(amountIn, tokenDecimals) : null;
+        const tonValue = tonOut;
+        if (tonValue < minThreshold) continue;
+        return {
+          // для SELL отображаем количество токенов (как и раньше для Bidask)
+          volume: tokenAmount ?? 0,
+          tonValue,
+          tokenAmount,
+          from: extractAddressField(swapObj.user) || extractAddressField(swapObj.sender) || tx.in_msg?.source?.address || 'Unknown',
+          to: tx.in_msg?.destination?.address || 'Unknown',
+          type: 'SELL',
+          dex: dexHint || swapObj.dex || swapObj.platform || swapObj.exchange || null,
+          hash: tx.hash || '',
+          timestamp: tx.utime || 0
+        };
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error('[parseSwapFromActions] Error:', error.message);
+      return null;
+    }
+}
+
+function parseSwapFromDecodedBody(decodedBody, minThreshold, tokenAddress, tokenDecimals, opName, dexHint, poolMeta) {
+  try {
+    // Специальный разбор stonfi_swap_v2: left/right_amount + swap_body.min_out
+    if (opName && opName.toLowerCase().includes('stonfi_swap') && decodedBody) {
+      const leftAmount = extractBigInt(decodedBody.left_amount);
+      const rightAmount = extractBigInt(decodedBody.right_amount);
+      const minOut = extractBigInt(decodedBody.dex_payload?.swap_body?.min_out);
+      const fromUser = decodedBody.from_user || decodedBody.dex_payload?.swap_body?.receiver;
+
+      const token0 = poolMeta?.token0 || null;
+      const token1 = poolMeta?.token1 || null;
+
+      const token0IsTon = isTonAddress(token0);
+      const token1IsTon = isTonAddress(token1);
+
+      // Считаем, что left_amount относится к token0, right_amount к token1
+      if (token1IsTon && token0) {
+        if (rightAmount && rightAmount > 0n) {
+          // BUY: TON -> token0
+          const tonValue = nanoToTon(rightAmount);
+          if (tonValue !== null && tonValue >= minThreshold) {
+            const tokenAmount = minOut ? unitsToNumber(minOut, tokenDecimals) : null;
+            return {
+              volume: tonValue,
+              tonValue,
+              tokenAmount,
+              from: fromUser || 'Unknown',
+              to: 'Unknown',
+              type: 'BUY',
+              dex: dexHint || opName || null,
+              hash: '',
+              timestamp: 0
+            };
+          }
+        }
+        if (leftAmount && leftAmount > 0n) {
+          // SELL: token0 -> TON, tonValue ≈ min_out
+          const tonValue = minOut ? nanoToTon(minOut) : null;
+          if (tonValue !== null && tonValue >= minThreshold) {
+            const tokenAmount = unitsToNumber(leftAmount, tokenDecimals);
+            return {
+              volume: tokenAmount ?? 0,
+              tonValue,
+              tokenAmount,
+              from: fromUser || 'Unknown',
+              to: 'Unknown',
+              type: 'SELL',
+              dex: dexHint || opName || null,
+              hash: '',
+              timestamp: 0
+            };
+          }
+        }
+      }
+
+      if (token0IsTon && token1) {
+        if (leftAmount && leftAmount > 0n) {
+          const tonValue = nanoToTon(leftAmount);
+          if (tonValue !== null && tonValue >= minThreshold) {
+            const tokenAmount = minOut ? unitsToNumber(minOut, tokenDecimals) : null;
+            return {
+              volume: tonValue,
+              tonValue,
+              tokenAmount,
+              from: fromUser || 'Unknown',
+              to: 'Unknown',
+              type: 'BUY',
+              dex: dexHint || opName || null,
+              hash: '',
+              timestamp: 0
+            };
+          }
+        }
+        if (rightAmount && rightAmount > 0n) {
+          const tonValue = minOut ? nanoToTon(minOut) : null;
+          if (tonValue !== null && tonValue >= minThreshold) {
+            const tokenAmount = unitsToNumber(rightAmount, tokenDecimals);
+            return {
+              volume: tokenAmount ?? 0,
+              tonValue,
+              tokenAmount,
+              from: fromUser || 'Unknown',
+              to: 'Unknown',
+              type: 'SELL',
+              dex: dexHint || opName || null,
+              hash: '',
+              timestamp: 0
+            };
+          }
+        }
+      }
+    }
+
+    const candidates = [
+      decodedBody,
+      decodedBody.swap,
+      decodedBody.params,
+      decodedBody.swap_body,
+      decodedBody.swapBody,
+      decodedBody.data
+    ].filter(obj => obj && typeof obj === 'object');
+
+    const tokenNorm = normalizeAddress(tokenAddress);
+
+    for (const body of candidates) {
+      const assetInRaw =
+        body.asset_in || body.assetIn ||
+        body.offer_asset || body.offerAsset ||
+        body.token_in || body.tokenIn ||
+        body.jetton_in || body.jettonIn ||
+        body.from_asset || body.fromAsset ||
+        body.from_token || body.fromToken;
+
+      const assetOutRaw =
+        body.asset_out || body.assetOut ||
+        body.ask_asset || body.askAsset ||
+        body.token_out || body.tokenOut ||
+        body.jetton_out || body.jettonOut ||
+        body.to_asset || body.toAsset ||
+        body.to_token || body.toToken;
+
+      const assetIn = detectAsset(assetInRaw);
+      const assetOut = detectAsset(assetOutRaw);
+
+      const amountIn =
+        extractBigInt(body.amount_in ?? body.amountIn ?? body.in_amount ?? body.inAmount ?? body.offer_amount ?? body.offerAmount ?? body.amount);
+      const amountOut =
+        extractBigInt(body.amount_out ?? body.amountOut ?? body.out_amount ?? body.outAmount ?? body.ask_amount ?? body.askAmount ?? body.min_amount_out ?? body.minAmountOut);
+
+      const jettonInNorm = assetIn.address ? normalizeAddress(assetIn.address) : null;
+      const jettonOutNorm = assetOut.address ? normalizeAddress(assetOut.address) : null;
+
+      const involvesToken = !!(tokenNorm && (tokenNorm === jettonInNorm || tokenNorm === jettonOutNorm));
+      if (!involvesToken) continue;
+
+      // BUY: TON -> token
+      if (assetIn.isTon && jettonOutNorm && tokenNorm === jettonOutNorm && amountIn !== null) {
+        const tonValue = nanoToTon(amountIn);
+        if (tonValue === null) continue;
+        if (tonValue < minThreshold) continue;
+        const tokenAmount = amountOut ? unitsToNumber(amountOut, tokenDecimals) : null;
+        return {
+          volume: tonValue,
+          tonValue,
+          tokenAmount,
+          from: extractAddressField(body.user) || extractAddressField(body.sender) || extractAddressField(decodedBody.sender) || 'Unknown',
+          to: extractAddressField(body.receiver) || extractAddressField(body.to) || 'Unknown',
+          type: 'BUY',
+          dex: dexHint || opName || null,
+          hash: '',
+          timestamp: 0
+        };
+      }
+
+      // SELL: token -> TON
+      if (assetOut.isTon && jettonInNorm && tokenNorm === jettonInNorm && amountOut !== null) {
+        const tonValue = nanoToTon(amountOut);
+        if (tonValue === null) continue;
+        if (tonValue < minThreshold) continue;
+        const tokenAmount = amountIn ? unitsToNumber(amountIn, tokenDecimals) : null;
+        return {
+          volume: tokenAmount ?? 0,
+          tonValue,
+          tokenAmount,
+          from: extractAddressField(body.user) || extractAddressField(body.sender) || extractAddressField(decodedBody.sender) || 'Unknown',
+          to: extractAddressField(body.receiver) || extractAddressField(body.to) || 'Unknown',
+          type: 'SELL',
+          dex: dexHint || opName || null,
+          hash: '',
+          timestamp: 0
+        };
+      }
+    }
+
+    if (opName && opName.toLowerCase().includes('stonfi')) {
+      console.log(`[parseSwapFromDecodedBody] Stonfi body keys: ${Object.keys(decodedBody || {}).join(', ')}`);
+      console.log(`[parseSwapFromDecodedBody] Stonfi body: ${safeJson(decodedBody)}`);
+    }
+    return null;
+  } catch (error) {
+    console.error('[parseSwapFromDecodedBody] Error:', error.message);
+    return null;
+  }
+}
+
+function parseTransaction(tx, minThreshold, tokenPrice, tokenAddress, tokenDecimals = 9, dexHint = null, poolMeta = null) {
   try {
     const txHash = tx.hash || 'unknown';
     console.log(`[2. PARSE_TRANSACTION] 🔍 Parsing tx: ${txHash.substring(0, 8)}...`);
 
-    if (!tx.in_msg) {
-      console.log(`[2. PARSE_TRANSACTION] ❌ No in_msg in tx ${txHash.substring(0, 8)}`);
-      return null;
-    }
-    const opName = tx.in_msg.decoded_op_name;
-    const decodedBody = tx.in_msg.decoded_body;
+    const opName = tx.in_msg?.decoded_op_name;
+    const decodedBody = tx.in_msg?.decoded_body;
     console.log(`[2. PARSE_TRANSACTION] 📋 Op name: ${opName}, has decodedBody: ${!!decodedBody}`);
     
     // Поддерживаем bidask_damm_swap (покупки), jetton_transfer и jetton_notify (продажи на стороне пула)
     if ((opName !== 'bidask_damm_swap' && opName !== 'jetton_transfer' && opName !== 'jetton_notify') || !decodedBody) {
-      console.log(`[2. PARSE_TRANSACTION] ❌ Op name is not bidask_damm_swap/jetton_transfer/jetton_notify, or no decodedBody`);
+      if (decodedBody) {
+        const decodedParsed = parseSwapFromDecodedBody(decodedBody, minThreshold, tokenAddress, tokenDecimals, opName, dexHint, poolMeta);
+        if (decodedParsed) {
+          decodedParsed.hash = tx.hash || '';
+          decodedParsed.timestamp = tx.utime || 0;
+          console.log(`[2. PARSE_TRANSACTION] ✅ Parsed via decodedBody (swap): ${decodedParsed.type} ${decodedParsed.tonValue} TON`);
+          return decodedParsed;
+        }
+      }
+      // Для Ston.fi / DeDust часто проще и надежнее брать нормализованный swap из tx.actions (TON API)
+      const actionParsed = parseSwapFromActions(tx, minThreshold, tokenAddress, tokenDecimals, dexHint);
+      if (actionParsed) {
+        console.log(`[2. PARSE_TRANSACTION] ✅ Parsed via actions (swap): ${actionParsed.type} ${actionParsed.tonValue} TON`);
+        return actionParsed;
+      }
+      console.log(`[2. PARSE_TRANSACTION] ❌ Not a supported Bidask op and no swap action found`);
       return null;
     }
     
@@ -301,9 +752,12 @@ function parseTransaction(tx, minThreshold, tokenPrice) {
       const to = actualDecodedBody.to_address || 'Unknown';
       const result = { 
         volume: value, 
+        tonValue: value,
+        tokenAmount: null,
         from, 
         to, 
         type, 
+        dex: dexHint || 'bidask',
         hash: tx.hash || '', 
         timestamp: tx.utime || 0 
       };
@@ -319,11 +773,11 @@ function parseTransaction(tx, minThreshold, tokenPrice) {
       console.log(`[2. PARSE_TRANSACTION] 🔍 ${opName} on pool = SELL (assuming correct token)`);
     } else {
       // Для bidask_damm_swap проверяем адрес токена
-      const tokenAddressNormalized = normalizeAddress(TOKEN_ADDRESS);
+      const tokenAddressNormalized = normalizeAddress(tokenAddress);
       const jettonAddressNormalized = normalizeAddress(jettonAddress);
-      jettonMatches = jettonAddress === TOKEN_ADDRESS || 
+      jettonMatches = jettonAddress === tokenAddress || 
                       (tokenAddressNormalized && jettonAddressNormalized && tokenAddressNormalized === jettonAddressNormalized);
-      console.log(`[2. PARSE_TRANSACTION] 🔍 Jetton comparison: jetton=${jettonAddress?.substring(0, 20) || 'none'}..., TOKEN_ADDRESS=${TOKEN_ADDRESS.substring(0, 20)}..., matches=${jettonMatches}`);
+      console.log(`[2. PARSE_TRANSACTION] 🔍 Jetton comparison: jetton=${jettonAddress?.substring(0, 20) || 'none'}..., TOKEN_ADDRESS=${tokenAddress.substring(0, 20)}..., matches=${jettonMatches}`);
     }
     
     if (jettonMatches) {
@@ -441,9 +895,12 @@ function parseTransaction(tx, minThreshold, tokenPrice) {
     // Для продажи volume - это количество TONDEV (для отображения), но проверка порога уже выполнена по TON
     const result = { 
       volume: type === 'SELL' ? tondevAmount : value, 
+      tonValue: type === 'SELL' ? value : value,
+      tokenAmount: type === 'SELL' ? tondevAmount : null,
       from, 
       to, 
       type, 
+      dex: dexHint || 'bidask',
       hash: tx.hash || '', 
       timestamp: tx.utime || 0 
     };
@@ -457,31 +914,46 @@ function parseTransaction(tx, minThreshold, tokenPrice) {
 }
 
 // ==================== УВЕДОМЛЕНИЯ ====================
-async function sendNotification(chatId, txData, price) {
+async function sendNotification(chatId, txData, price, tokenAddress, tokenImageOverride, bidaskPool) {
   console.log(`[4. SEND_NOTIFICATION] 📤 Sending notification for tx: ${txData.hash.substring(0, 8)}..., type: ${txData.type}, chatId: ${chatId}`);
   const buyerInfo = await formatAddress(txData.from);
   const buyerDisplay = buyerInfo.display.length > 20 ? buyerInfo.display.substring(0, 17) + '...' : buyerInfo.display;
-  const mc = calculateMC(price);
+  const mc = calculateMC(price, txData.totalSupply || null);
+  const dexLabel = (txData.dex || 'DEX').toString().toUpperCase();
 
   let caption;
   if (txData.type === 'BUY') {
-    const emoji = getRocketString(txData.volume);
-    caption = `<b>NEW BUY!</b> ${emoji}\n\n💎 <b>${formatNumber(txData.volume)} TON</b>\n🦑 <a href="https://tonviewer.com/${buyerInfo.link}">${buyerDisplay}</a> | <a href="https://tonviewer.com/transaction/${txData.hash}">Txn</a>\n🌐 MC: ${mc}`;
+    const tonValue = txData.tonValue ?? txData.volume;
+    const emoji = getRocketString(tonValue);
+    const tokenLine = (txData.tokenAmount !== null && txData.tokenAmount !== undefined)
+      ? `\n🪙 Received: <b>${formatNumber(txData.tokenAmount)} ${txData.tokenSymbol || 'TOKEN'}</b>`
+      : '';
+    caption = `<b>NEW BUY!</b> ${emoji}\n\n💎 <b>${formatNumber(tonValue)} TON</b>${tokenLine}\n🦑 <a href="https://tonviewer.com/${buyerInfo.link}">${buyerDisplay}</a> | <a href="https://tonviewer.com/transaction/${txData.hash}">Txn</a>\n🌐 MC: ${mc}\n🏪 DEX: <b>${dexLabel}</b>`;
   } else {
-    const emoji = getHeartString(txData.volume);
-    caption = `<b>NEW SELL!</b> ${emoji}\n\n🤬 <b>${formatNumber(txData.volume)} TONDEV</b>\n🦑 <a href="https://tonviewer.com/${buyerInfo.link}">${buyerDisplay}</a> | <a href="https://tonviewer.com/transaction/${txData.hash}">Txn</a>\n🌐 MC: ${mc}`;
+    const symbol = txData.tokenSymbol || 'TOKEN';
+    const tokenAmount = txData.tokenAmount ?? txData.volume;
+    const emoji = getHeartString(txData.tonValue ?? 1);
+    const mainLine = tokenAmount ? `🤬 <b>${formatNumber(tokenAmount)} ${symbol}</b>` : `🤬 <b>SELL</b>`;
+    caption = `<b>NEW SELL!</b> ${emoji}\n\n${mainLine}\n🦑 <a href="https://tonviewer.com/${buyerInfo.link}">${buyerDisplay}</a> | <a href="https://tonviewer.com/transaction/${txData.hash}">Txn</a>\n🌐 MC: ${mc}\n🏪 DEX: <b>${dexLabel}</b>`;
   }
 
   const keyboard = {
     inline_keyboard: [
-      [{ text: 'DTRADE', url: `https://t.me/dtrade?start=26RoWqxLlD_${TOKEN_ADDRESS}` },
-       { text: 'Graph', url: `https://x1000.finance/tokens/${TOKEN_ADDRESS}?ref=nextmayor` }],
-      [{ text: 'JOIN HOLDERS CHAT', url: 'https://t.me/tondev_jetton/289' }]
+      [
+        { text: 'DTRADE', url: `https://t.me/dtrade?start=26RoWqxLlD_${tokenAddress}` },
+        { text: 'Graph', url: `https://x1000.finance/tokens/${tokenAddress}?ref=nextmayor` }
+      ]
     ]
   };
 
+  if (bidaskPool) {
+    keyboard.inline_keyboard.push([
+      { text: '🔥 TRADE ON BIDASK', url: `https://bidask.finance/en/app/pools/${bidaskPool}?utm_campaign=buybot` }
+    ]);
+  }
+
   try {
-    const tokenImage = await getTokenImage();
+    const tokenImage = tokenImageOverride || await getTokenImage(tokenAddress);
     if (tokenImage) {
       await bot.sendPhoto(chatId, tokenImage, { caption, parse_mode: 'HTML', reply_markup: keyboard });
       console.log(`[4. SEND_NOTIFICATION] ✅ Notification sent with photo to chat ${chatId}`);
@@ -496,7 +968,37 @@ async function sendNotification(chatId, txData, price) {
 }
 
 // ==================== МОНИТОРИНГ ====================
-let lastProcessedTimestamp = Math.floor(Date.now() / 1000) - 600; // Обрабатываем транзакции за последние 10 минут
+const lastProcessedTimestamp = new Map(); // key: `${chatId}:${pool}` -> ts
+const lastPoolDiscovery = new Map(); // key chatId -> timestamp
+
+function getLastTs(chatId, pool) {
+  return lastProcessedTimestamp.get(`${chatId}:${pool}`) || (Math.floor(Date.now() / 1000) - 600);
+}
+function setLastTs(chatId, pool, ts) {
+  lastProcessedTimestamp.set(`${chatId}:${pool}`, ts);
+}
+
+function shouldDiscover(chatId) {
+  const last = lastPoolDiscovery.get(chatId) || 0;
+  return Date.now() - last > POOL_DISCOVERY_INTERVAL;
+}
+
+async function refreshPoolsForChat(chatId) {
+  const cfg = chatConfigs[chatId];
+  if (!cfg || !cfg.tokenAddress) return;
+  if (!shouldDiscover(chatId)) return;
+  const stonfi = await fetchStonfiPools(cfg.tokenAddress);
+  const dedust = await fetchDedustPools(cfg.tokenAddress);
+  cfg.stonfiPools = stonfi.map(p => p.address);
+  cfg.stonfiPoolsMeta = stonfi.reduce((acc, p) => {
+    acc[p.address] = { token0: p.token0_address, token1: p.token1_address };
+    return acc;
+  }, {});
+  cfg.dedustPools = dedust;
+  lastPoolDiscovery.set(chatId, Date.now());
+  await saveState();
+  console.log(`[DISCOVERY] Updated pools for ${chatId}: stonfi=${stonfi.length}, dedust=${dedust.length}`);
+}
 
 async function monitorTransactions() {
   try {
@@ -504,10 +1006,6 @@ async function monitorTransactions() {
       console.log('[MONITOR] ❌ TON_API_KEY not set, skipping');
       return;
     }
-    const transactions = await getTransactions() || [];
-    const price = await getTokenPrice();
-    console.log(`[MONITOR] 📊 Processing ${transactions.length} transactions, price: ${price || 'N/A'}, lastProcessedTimestamp: ${lastProcessedTimestamp}`);
-
     if (notificationChats.size === 0) {
       console.log('[MONITOR] ⚠️ No notification chats registered');
       return;
@@ -519,72 +1017,89 @@ async function monitorTransactions() {
         console.log(`[MONITOR] ⚠️ Skipping personal chat ${chatId} - notifications only for groups`);
         continue;
       }
+
+      const cfg = chatConfigs[chatId];
+      if (!cfg || !cfg.tokenAddress) {
+        console.log(`[MONITOR] ⚠️ Chat ${chatId} has no token configured`);
+        continue;
+      }
+
+      await refreshPoolsForChat(chatId);
+
+      const pools = [
+        cfg.bidaskPool,
+        ...(cfg.stonfiPools || []),
+        ...(cfg.dedustPools || [])
+      ].filter(Boolean);
+
+      if (pools.length === 0) {
+        console.log(`[MONITOR] ⚠️ Chat ${chatId} has no pools configured`);
+        continue;
+      }
+
+      const price = await getTokenPrice(cfg.tokenAddress);
       
       const minThreshold = chatSettings[chatId]?.minBuyThreshold || 5;
-      console.log(`[MONITOR] 💬 Processing chat ${chatId} with threshold ${minThreshold} TON`);
-      
-      let processedCount = 0;
-      let skippedOldCount = 0;
-      let bidaskSwapCount = 0;
-      let otherOpsCount = 0;
-      
-      // Сначала посчитаем статистику по операциям и выведем структуру первой транзакции
-      for (const tx of transactions) {
-        const opName = tx.in_msg?.decoded_op_name;
-        if (opName === 'bidask_damm_swap') {
-          bidaskSwapCount++;
-        } else if (opName) {
-          otherOpsCount++;
+      console.log(`[MONITOR] 💬 Processing chat ${chatId} with threshold ${minThreshold} TON, pools=${pools.length}`);
+
+      for (const pool of pools) {
+        const dexHint =
+          pool === cfg.bidaskPool ? 'bidask' :
+          (cfg.stonfiPools || []).includes(pool) ? 'stonfi' :
+          (cfg.dedustPools || []).includes(pool) ? 'dedust' :
+          null;
+        const poolMeta = (cfg.stonfiPoolsMeta && cfg.stonfiPoolsMeta[pool]) ? cfg.stonfiPoolsMeta[pool] : null;
+        const transactions = await getTransactions(pool) || [];
+        // Обрабатываем в порядке возрастания времени, чтобы не пропускать более ранние tx,
+        // если встретили позднюю и обновили lastTs
+        transactions.sort((a, b) => (a.utime || 0) - (b.utime || 0));
+        console.log(`[MONITOR] 📊 Pool ${pool} has ${transactions.length} txs, lastTs=${getLastTs(chatId, pool)}`);
+
+        let processedCount = 0;
+        let skippedOldCount = 0;
+
+        const newTxs = transactions.filter(tx => tx.utime > getLastTs(chatId, pool));
+        if (newTxs.length > 0) {
+          const firstNewTx = newTxs[0];
+          console.log(`[MONITOR] 🔬 Debug first new tx structure for pool ${pool}:`, JSON.stringify({
+            hash: firstNewTx.hash?.substring(0, 16),
+            utime: firstNewTx.utime,
+            in_msg: {
+              decoded_op_name: firstNewTx.in_msg?.decoded_op_name,
+              has_decoded_body: !!firstNewTx.in_msg?.decoded_body,
+              source: firstNewTx.in_msg?.source?.address?.substring(0, 20),
+              destination: firstNewTx.in_msg?.destination?.address?.substring(0, 20),
+            },
+            out_msgs_count: firstNewTx.out_msgs?.length || 0,
+            actions_count: firstNewTx.actions?.length || 0,
+          }, null, 2));
         }
-      }
-      console.log(`[MONITOR] 📊 Transaction stats: bidask_damm_swap=${bidaskSwapCount}, other_ops=${otherOpsCount}, no_op=${transactions.length - bidaskSwapCount - otherOpsCount}`);
-      
-      // Выводим структуру первой новой транзакции для отладки
-      const newTxs = transactions.filter(tx => tx.utime > lastProcessedTimestamp);
-      if (newTxs.length > 0) {
-        const firstNewTx = newTxs[0];
-        console.log(`[MONITOR] 🔬 Debug first new tx structure:`, JSON.stringify({
-          hash: firstNewTx.hash?.substring(0, 16),
-          utime: firstNewTx.utime,
-          in_msg: {
-            decoded_op_name: firstNewTx.in_msg?.decoded_op_name,
-            has_decoded_body: !!firstNewTx.in_msg?.decoded_body,
-            source: firstNewTx.in_msg?.source?.address?.substring(0, 20),
-            destination: firstNewTx.in_msg?.destination?.address?.substring(0, 20),
-          },
-          out_msgs_count: firstNewTx.out_msgs?.length || 0,
-          actions_count: firstNewTx.actions?.length || 0,
-        }, null, 2));
-      }
-      
-      for (const tx of transactions) {
-        const txHash = tx.hash?.substring(0, 8) || 'unknown';
-        const opName = tx.in_msg?.decoded_op_name || 'no op_name';
-        const hasDecodedBody = !!tx.in_msg?.decoded_body;
-        console.log(`[MONITOR] 🔍 Tx ${txHash}... | op: ${opName} | has_decoded_body: ${hasDecodedBody} | utime: ${tx.utime}`);
-        
-        if (tx.utime <= lastProcessedTimestamp) {
-          skippedOldCount++;
-          console.log(`[MONITOR] ⏭️ Skipping old tx (utime ${tx.utime} <= ${lastProcessedTimestamp})`);
-          continue;
-        }
-        
-        console.log(`[3. CHECK_THRESHOLD] 🔍 Processing new tx, passing to parser...`);
-        const txData = parseTransaction(tx, minThreshold, price);
-        if (txData) {
-          console.log(`[3. CHECK_THRESHOLD] ✅ Transaction passed all checks:`, txData);
-          await sendNotification(chatId, txData, price);
-          if (txData.timestamp > lastProcessedTimestamp) {
-            console.log(`[MONITOR] 📅 Updating lastProcessedTimestamp: ${lastProcessedTimestamp} -> ${txData.timestamp}`);
-            lastProcessedTimestamp = txData.timestamp;
+
+        for (const tx of transactions) {
+          const txHash = tx.hash?.substring(0, 8) || 'unknown';
+          const opName = tx.in_msg?.decoded_op_name || 'no op_name';
+          const hasDecodedBody = !!tx.in_msg?.decoded_body;
+          console.log(`[MONITOR] 🔍 Tx ${txHash}... | op: ${opName} | has_decoded_body: ${hasDecodedBody} | utime: ${tx.utime}`);
+
+          if (tx.utime <= getLastTs(chatId, pool)) {
+            skippedOldCount++;
+            continue;
           }
-          processedCount++;
-        } else {
-          console.log(`[3. CHECK_THRESHOLD] ❌ Transaction did not pass parsing/threshold check`);
+
+          const txData = parseTransaction(tx, minThreshold, price, cfg.tokenAddress, cfg.decimals || 9, dexHint, poolMeta);
+          if (txData) {
+            txData.totalSupply = cfg.totalSupply;
+            txData.tokenSymbol = cfg.tokenSymbol;
+            await sendNotification(chatId, txData, price, cfg.tokenAddress, cfg.tokenImage, cfg.bidaskPool);
+            if (txData.timestamp > getLastTs(chatId, pool)) {
+              setLastTs(chatId, pool, txData.timestamp);
+            }
+            processedCount++;
+          }
         }
+
+        console.log(`[MONITOR] 📈 Summary for chat ${chatId}, pool ${pool}: processed=${processedCount}, skipped_old=${skippedOldCount}, total=${transactions.length}`);
       }
-      
-      console.log(`[MONITOR] 📈 Summary for chat ${chatId}: processed=${processedCount}, skipped_old=${skippedOldCount}, total=${transactions.length}`);
     }
   } catch (error) {
     console.error('[MONITOR] ❌ Error in monitorTransactions:', error.message);
@@ -685,7 +1200,8 @@ async function saveState() {
     const state = {
       notificationChats: Array.from(notificationChats),
       autoRegisteredChats: Array.from(autoRegisteredChats),
-      chatSettings: chatSettings
+      chatSettings: chatSettings,
+      chatConfigs: chatConfigs
     };
     await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
     console.log(`[SAVE_STATE] ✅ State saved: ${notificationChats.size} chats`);
@@ -710,6 +1226,10 @@ async function loadState() {
     
     if (state.chatSettings && typeof state.chatSettings === 'object') {
       Object.assign(chatSettings, state.chatSettings);
+    }
+
+    if (state.chatConfigs && typeof state.chatConfigs === 'object') {
+      Object.assign(chatConfigs, state.chatConfigs);
     }
     
     console.log(`[LOAD_STATE] ✅ State loaded: ${notificationChats.size} chats`);
@@ -775,6 +1295,7 @@ bot.onText(/\/start/, async (msg) => {
     }
 
     console.log(`[/START] ✅ Access granted for user ${userId}`);
+    ensureChatConfig(chatId);
 
     // Автоматически регистрируем группу, если бот является администратором
     if (chatId < 0) {
@@ -794,22 +1315,28 @@ bot.onText(/\/start/, async (msg) => {
         await bot.sendMessage(chatId, "⚠️ Уведомления работают только в группах. Добавьте бота в группу как администратора с правом отправки сообщений.", { parse_mode: 'HTML' });
         // Не прерываем выполнение, показываем информацию о токене
     }
-    if (!chatSettings[chatId]) chatSettings[chatId] = { minBuyThreshold: 5 };
-
     const settings = chatSettings[chatId];
+    const cfg = chatConfigs[chatId];
+
+    if (!cfg.tokenAddress) {
+        pendingSetup.set(chatId, { step: 'token', adminId: userId });
+        await bot.sendMessage(chatId, "Укажите адрес токена (CA) для мониторинга:", { parse_mode: 'HTML' });
+        return;
+    }
 
     const message = `
 🏴 <b>Token Info</b>
-CA: <code>${TOKEN_ADDRESS}</code>
+🔹 Name: <b>${cfg.tokenName || cfg.tokenSymbol || 'N/A'}</b>
+🔹 CA: <code>${cfg.tokenAddress}</code>
 🔹 Minimum buy threshold: <b>${settings.minBuyThreshold} TON</b>
 🔹 Notifications for this chat: <b>${chatId < 0 && notificationChats.has(chatId) ? 'ON' : 'OFF'}</b>${chatId > 0 ? '\n\n⚠️ Уведомления работают только в группах' : ''}
-
-💸 <a href="https://t.me/dtrade?start=26RoWqxLlD_${TOKEN_ADDRESS}">Trade on @dtrade</a>
-🏴 <a href="https://bidask.finance/en/app/swap/ton/${TOKEN_ADDRESS}">Swap on Bidask</a>
+🔹 Bidask pool: <code>${cfg.bidaskPool || 'не задан'}</code>
+🔹 Stonfi pools: ${cfg.stonfiPools?.length || 0}
+🔹 DeDust pools: ${cfg.dedustPools?.length || 0}
 `;
 
     try {
-        await bot.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: true });
+        await sendWithImage(chatId, message, cfg.tokenAddress, cfg.tokenImage);
         console.log(`[/START] ✅ Start message sent successfully to chat ${chatId}`);
     } catch (error) {
         console.error(`[/START] ❌ Error sending /start message:`, error.message);
@@ -820,8 +1347,12 @@ CA: <code>${TOKEN_ADDRESS}</code>
 // ==================== КОМАНДА /CA ====================
 bot.onText(/\/ca$/i, async (msg) => {
     const chatId = msg.chat.id;
+    const cfg = chatConfigs[chatId];
+    if (!cfg?.tokenAddress) {
+        return bot.sendMessage(chatId, "Токен не настроен. Укажите CA через /settoken.", { parse_mode: 'HTML' });
+    }
 
-    const message = `🏴 <b>Contract Address</b>\n\n<code>${TOKEN_ADDRESS}</code>\n\n💸 <a href="https://t.me/dtrade?start=26RoWqxLlD_${TOKEN_ADDRESS}">Trade on @dtrade</a>\n🏴 <a href="https://bidask.finance/en/app/swap/ton/${TOKEN_ADDRESS}">Swap on Bidask</a>`;
+    const message = `🏴 <b>Contract Address</b>\n\n<code>${cfg.tokenAddress}</code>\n\n💸 <a href="https://t.me/dtrade?start=26RoWqxLlD_${cfg.tokenAddress}">Trade on @dtrade</a>\n🏴 <a href="https://bidask.finance/en/app/swap/ton/${cfg.tokenAddress}">Swap on Bidask</a>`;
     
     try {
         await bot.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: true });
@@ -840,19 +1371,28 @@ bot.onText(/\/status$/i, async (msg) => {
     }
 
     const settings = chatSettings[chatId] || { minBuyThreshold: 5 };
+    const cfg = chatConfigs[chatId];
+    if (!cfg?.tokenAddress) {
+        return bot.sendMessage(chatId, "Токен не настроен. Укажите CA через /settoken.", { parse_mode: 'HTML' });
+    }
     const isMonitoring = notificationChats.has(chatId);
-    const price = await getTokenPrice();
-    const mc = calculateMC(price);
+    const price = await getTokenPrice(cfg.tokenAddress);
+    const mc = calculateMC(price, cfg.totalSupply);
 
     const message = `📊 <b>Bot Status</b>\n\n` +
         `🔹 Notifications: <b>${isMonitoring ? 'ON' : 'OFF'}</b>\n` +
         `🔹 Minimum threshold: <b>${settings.minBuyThreshold} TON</b>\n` +
         `🔹 Token price: <b>$${price ? price.toFixed(8) : 'N/A'}</b>\n` +
         `🔹 Market Cap: <b>${mc}</b>\n` +
+        `🔹 Token: <b>${cfg.tokenName || cfg.tokenSymbol || 'N/A'}</b>\n` +
+        `🔹 CA: <code>${cfg.tokenAddress}</code>\n` +
+        `🔹 Bidask pool: <code>${cfg.bidaskPool || 'не задан'}</code>\n` +
+        `🔹 Stonfi pools: ${cfg.stonfiPools?.length || 0}\n` +
+        `🔹 DeDust pools: ${cfg.dedustPools?.length || 0}\n` +
         `🔹 Monitoring interval: <b>${POLL_INTERVAL / 1000}s</b>`;
 
     try {
-        await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
+        await sendWithImage(chatId, message, cfg.tokenAddress, cfg.tokenImage);
     } catch (error) {
         console.error(`[/STATUS] Error:`, error.message);
     }
@@ -886,6 +1426,51 @@ bot.onText(/\/volume(?:\s+(\d+(?:\.\d+)?))?/i, async (msg, match) => {
     }
 });
 
+bot.onText(/\/settoken(?:\s+(\S+))?/i, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    if (!(await isAdmin(chatId, userId))) {
+        return bot.sendMessage(chatId, "⛔ Эта команда доступна только администраторам чата.");
+    }
+    ensureChatConfig(chatId);
+    const ca = match[1];
+    if (!ca) {
+        pendingSetup.set(chatId, { step: 'token', adminId: userId });
+        return bot.sendMessage(chatId, "Укажите адрес токена (CA) для мониторинга:");
+    }
+    const info = await fetchJettonInfo(ca);
+    if (!info) return bot.sendMessage(chatId, "❌ Не удалось получить данные токена. Проверьте CA и TON_API_KEY.");
+    chatConfigs[chatId].tokenAddress = ca;
+    chatConfigs[chatId].decimals = info.decimals;
+    chatConfigs[chatId].totalSupply = info.totalSupply;
+    chatConfigs[chatId].tokenImage = info.image;
+    chatConfigs[chatId].tokenName = info.name;
+    chatConfigs[chatId].tokenSymbol = info.symbol;
+    // Сброс пулов для обновления
+    chatConfigs[chatId].stonfiPools = [];
+    chatConfigs[chatId].dedustPools = [];
+    await refreshPoolsForChat(chatId);
+    await saveState();
+    await bot.sendMessage(chatId, `✅ Токен обновлён: ${info.name || info.symbol || ca}\nStonfi пулов: ${chatConfigs[chatId].stonfiPools.length}\nDeDust пулов: ${chatConfigs[chatId].dedustPools.length}\nУкажите адрес пула Bidask через /setpool <адрес>`, { parse_mode: 'HTML' });
+});
+
+bot.onText(/\/setpool(?:\s+(\S+))?/i, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    if (!(await isAdmin(chatId, userId))) {
+        return bot.sendMessage(chatId, "⛔ Эта команда доступна только администраторам чата.");
+    }
+    ensureChatConfig(chatId);
+    const pool = match[1];
+    if (!pool) {
+        pendingSetup.set(chatId, { step: 'bidask', adminId: userId });
+        return bot.sendMessage(chatId, "Укажите адрес пула на Bidask:");
+    }
+    chatConfigs[chatId].bidaskPool = pool;
+    await saveState();
+    await bot.sendMessage(chatId, `✅ Адрес пула Bidask обновлён: ${pool}`);
+});
+
 // ==================== КОМАНДА /HELP ====================
 bot.onText(/\/help$/i, async (msg) => {
     const chatId = msg.chat.id;
@@ -899,6 +1484,8 @@ bot.onText(/\/help$/i, async (msg) => {
         `<b>Для всех:</b>\n` +
         `/start - Активировать бота и показать информацию о токене\n\n` +
         `<b>Только для администраторов:</b>\n` +
+        `/settoken <CA> - Установить адрес токена\n` +
+        `/setpool <адрес> - Установить адрес пула Bidask\n` +
         `/ca - Показать адрес контракта (CA)\n` +
         `/status - Показать статус бота\n` +
         `/volume [число] - Показать/изменить минимальный порог (по умолчанию 5 TON)\n` +
@@ -1003,6 +1590,53 @@ bot.onText(/\/unmute$/i, async (msg) => {
 // Обработчик всех сообщений для автоматической регистрации групп
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
+    const userId = msg.from.id;
+
+    // Пошаговая настройка
+    const pending = pendingSetup.get(chatId);
+    if (pending && pending.adminId === userId && msg.text && !msg.text.startsWith('/')) {
+        const text = msg.text.trim();
+        ensureChatConfig(chatId);
+        if (pending.step === 'token') {
+            const info = await fetchJettonInfo(text);
+            if (!info) {
+                await bot.sendMessage(chatId, "❌ Не удалось получить данные токена. Проверьте CA и повторите.");
+                return;
+            }
+            chatConfigs[chatId].tokenAddress = text;
+            chatConfigs[chatId].decimals = info.decimals;
+            chatConfigs[chatId].totalSupply = info.totalSupply;
+            chatConfigs[chatId].tokenImage = info.image;
+            chatConfigs[chatId].tokenName = info.name;
+            chatConfigs[chatId].tokenSymbol = info.symbol;
+            chatConfigs[chatId].stonfiPools = [];
+            chatConfigs[chatId].dedustPools = [];
+            pendingSetup.set(chatId, { step: 'bidask', adminId: userId });
+            await refreshPoolsForChat(chatId);
+            await saveState();
+            await bot.sendMessage(chatId, `✅ Токен принят: ${info.name || info.symbol || text}\nУкажите адрес пула на Bidask:`);
+            return;
+        }
+        if (pending.step === 'bidask') {
+            chatConfigs[chatId].bidaskPool = text;
+            pendingSetup.set(chatId, { step: 'threshold', adminId: userId });
+            await saveState();
+            await bot.sendMessage(chatId, "✅ Пул Bidask сохранён. Установите порог (TON), например 5:");
+            return;
+        }
+        if (pending.step === 'threshold') {
+            const num = parseFloat(text);
+            if (isNaN(num) || num <= 0) {
+                await bot.sendMessage(chatId, "❌ Неверное значение. Введите положительное число TON.");
+                return;
+            }
+            chatSettings[chatId].minBuyThreshold = num;
+            pendingSetup.delete(chatId);
+            await saveState();
+            await bot.sendMessage(chatId, `✅ Порог установлен: ${num} TON. Бот начнёт мониторинг.`);
+            return;
+        }
+    }
     
     // Автоматически регистрируем группу, если бот является администратором
     // Проверяем только если чат еще не зарегистрирован
