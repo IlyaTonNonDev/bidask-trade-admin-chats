@@ -1544,20 +1544,30 @@ bot.onText(/\/settoken(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
     if (!ca) {
         return bot.sendMessage(chatId, "❌ Укажите адрес токена. Формат: /settoken CA");
     }
-    const info = await fetchJettonInfo(ca);
-    if (!info) return bot.sendMessage(chatId, "❌ Не удалось получить данные токена. Проверьте CA и TON_API_KEY.");
-    chatConfigs[chatId].tokenAddress = ca;
-    chatConfigs[chatId].decimals = info.decimals;
-    chatConfigs[chatId].totalSupply = info.totalSupply;
-    chatConfigs[chatId].tokenImage = info.image;
-    chatConfigs[chatId].tokenName = info.name;
-    chatConfigs[chatId].tokenSymbol = info.symbol;
-    // Сброс пулов для обновления
-    chatConfigs[chatId].stonfiPools = [];
-    chatConfigs[chatId].dedustPools = [];
-    await refreshPoolsForChat(chatId, true);
-    await saveState();
-    await bot.sendMessage(chatId, `✅ Токен обновлён: ${info.name || info.symbol || ca}\nStonfi пулов: ${chatConfigs[chatId].stonfiPools.length}\nDeDust пулов: ${chatConfigs[chatId].dedustPools.length}\nУкажите адрес пула Bidask через /setpool &lt;адрес&gt;`, { parse_mode: 'HTML' });
+    try {
+        const info = await fetchJettonInfo(ca);
+        chatConfigs[chatId].tokenAddress = ca;
+        chatConfigs[chatId].decimals = info?.decimals ?? chatConfigs[chatId].decimals ?? 9;
+        chatConfigs[chatId].totalSupply = info?.totalSupply ?? chatConfigs[chatId].totalSupply ?? null;
+        chatConfigs[chatId].tokenImage = info?.image ?? chatConfigs[chatId].tokenImage ?? null;
+        chatConfigs[chatId].tokenName = info?.name ?? chatConfigs[chatId].tokenName ?? '';
+        chatConfigs[chatId].tokenSymbol = info?.symbol ?? chatConfigs[chatId].tokenSymbol ?? '';
+        // Сброс пулов для обновления
+        chatConfigs[chatId].stonfiPools = [];
+        chatConfigs[chatId].dedustPools = [];
+        await refreshPoolsForChat(chatId, true);
+        await saveState();
+        const infoLabel = info ? (info.name || info.symbol || ca) : ca;
+        const note = info ? '' : '\n⚠️ Не удалось получить метаданные токена (проверьте CA и TON_API_KEY).';
+        await bot.sendMessage(
+          chatId,
+          `✅ Токен обновлён: ${infoLabel}\nStonfi пулов: ${chatConfigs[chatId].stonfiPools.length}\nDeDust пулов: ${chatConfigs[chatId].dedustPools.length}${note}\nУкажите адрес пула Bidask через /setpool &lt;адрес&gt;`,
+          { parse_mode: 'HTML' }
+        );
+    } catch (error) {
+        console.error(`[/SETTOKEN] Error:`, error.message);
+        await bot.sendMessage(chatId, `❌ Ошибка при установке токена: ${error.message}`);
+    }
 });
 
 bot.onText(/\/setpool(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
