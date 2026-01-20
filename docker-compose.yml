@@ -1,0 +1,10 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: ton-buybot
+    restart: unless-stopped
+    volumes:
+      - ./secretkeys.env:/app/secretkeys.env:ro
+      - ./bot_state.json:/app/bot_state.json

@@ -33,6 +33,15 @@ Telegram bot for monitoring TON token trades on Bidask, STON.fi, and DeDust with
 4. Install dependencies: `npm install`
 5. Run: `npm start`
 
+## Docker (recommended for VPS)
+
+1. Ensure `secretkeys.env` exists in the project root.
+2. Ensure `bot_state.json` exists (can be empty `{}` on first run).
+3. Build and run:
+   - `docker compose up -d --build`
+4. View logs:
+   - `docker logs -f ton-buybot`
+
 ## Configuration
 
 Use bot commands to configure each chat:
@@ -56,6 +65,7 @@ Works with:
 - bothost.ru
 - Replit
 - Any Node.js hosting with environment variables support
+- Any VPS with Docker (use `docker-compose.yml`)
 
 ## License
 

@@ -1,0 +1,8 @@
+node_modules
+npm-debug.log
+bot_state.json
+secretkeys.env
+.git
+.gitignore
+README.md
+DEBUG_STAGES.md
