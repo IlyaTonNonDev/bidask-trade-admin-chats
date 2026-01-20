@@ -1539,8 +1539,7 @@ bot.onText(/\/settoken(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
         return bot.sendMessage(chatId, "⛔ Эта команда доступна только администраторам чата.");
     }
     ensureChatConfig(chatId);
-    const text = (msg.text || '').trim();
-    const ca = text.replace(/^\/settoken(@\w+)?\s+/i, '').trim();
+    const ca = (match && match[1]) ? match[1].trim() : '';
     if (!ca) {
         return bot.sendMessage(chatId, "❌ Укажите адрес токена. Формат: /settoken CA");
     }
@@ -1581,8 +1580,7 @@ bot.onText(/\/setpool(?:@\w+)?(?:\s+(\S+))?/i, async (msg, match) => {
         return bot.sendMessage(chatId, "⛔ Эта команда доступна только администраторам чата.");
     }
     ensureChatConfig(chatId);
-    const text = (msg.text || '').trim();
-    const pool = text.replace(/^\/setpool(@\w+)?\s+/i, '').trim();
+    const pool = (match && match[1]) ? match[1].trim() : '';
     if (!pool) {
         return bot.sendMessage(chatId, "❌ Укажите адрес пула. Формат: /setpool &lt;адрес&gt;");
     }
